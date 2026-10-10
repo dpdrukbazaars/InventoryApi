@@ -57,36 +57,48 @@ public class ReturnRequest {
     @Column(nullable = false)
     private Instant createdAt;
 
+
     @ElementCollection(fetch = FetchType.EAGER)
-    @CollectionTable(name = "return_request_items", joinColumns = @JoinColumn(name = "request_id"),
-            foreignKey = @ForeignKey(name = "fk_return_request_items_request"))
+    @CollectionTable(
+            name = "return_request_items",
+            joinColumns = @JoinColumn(name = "request_id"),
+            foreignKey = @ForeignKey(
+                    name = "fk_return_request_items_request"
+            )
+    )
     private List<Line> lines = new ArrayList<>();
 
-    /** One product of the request. */
     @Embeddable
     @Getter
     @Setter
     public static class Line {
-        @Column(nullable = false)
+
+        @Column(name = "order_item_id", nullable = false)
         private Long orderItemId;
 
-        @Column(nullable = false)
+        @Column(name = "item_id", nullable = false)
         private Long itemId;
 
-        @Column(nullable = false)
+        @Column(name = "item_name", nullable = false, length = 255)
         private String itemName;
 
-        @Column(nullable = false)
+        @Column(name = "quantity", nullable = false)
         private int quantity;
 
         public Line() {
         }
 
-        public Line(Long orderItemId, Long itemId, String itemName, int quantity) {
+        public Line(
+                Long orderItemId,
+                Long itemId,
+                String itemName,
+                int quantity) {
+
             this.orderItemId = orderItemId;
             this.itemId = itemId;
             this.itemName = itemName;
             this.quantity = quantity;
         }
     }
+
 }
