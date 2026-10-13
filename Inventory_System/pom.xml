@@ -1,13 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 
-         https://maven.apache.org/xsd/maven-4.0.0.xsd">
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>4.1.1</version> <!-- CHANGED from 3.2.5 -->
+        <version>4.1.1</version>
         <relativePath/>
     </parent>
 
@@ -18,14 +18,15 @@
     <description>DP DrukBazaars: the online shop and marketplace API (Spring Boot)</description>
 
     <properties>
-        <java.version>26</java.version>          <!-- CHANGED from 21 -->
-        <lombok.version>1.18.46</lombok.version> <!-- NEW: first Lombok with Java 26 support -->
+        <java.version>25</java.version>
+        <lombok.version>1.18.46</lombok.version>
     </properties>
 
     <dependencies>
+        <!-- Spring Boot 4 renamed the web starter to webmvc. -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-web</artifactId>
+            <artifactId>spring-boot-starter-webmvc</artifactId>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -43,21 +44,21 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
-        <dependency>
-            <groupId>org.springframework.session</groupId>
-            <artifactId>spring-session-core</artifactId>
-        </dependency>
-        <!-- Sign-ins are kept in MySQL, so restarting the server does not sign everyone out -->
+
+        <!-- Persist customer login sessions in the relational database.
+             This transitively includes spring-session-core. -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-session-jdbc</artifactId>
         </dependency>
-        <!-- Emails: password reset links and order updates (SMTP, set in the server's environment) -->
+
+        <!-- Outgoing emails, e.g. password resets and order notifications. -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-mail</artifactId>
         </dependency>
-        <!-- Database versions: src/main/resources/db/migration/V*.sql build and upgrade the tables -->
+
+        <!-- Schema migration support for MySQL. -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-flyway</artifactId>
@@ -67,43 +68,59 @@
             <artifactId>flyway-mysql</artifactId>
         </dependency>
 
+        <!-- Database drivers -->
         <dependency>
             <groupId>com.mysql</groupId>
             <artifactId>mysql-connector-j</artifactId>
             <scope>runtime</scope>
         </dependency>
+        <!-- Keep runtime scope while verifying existing H2 development usage.
+             If only tests use H2, this can later be changed to test scope. -->
         <dependency>
             <groupId>com.h2database</groupId>
             <artifactId>h2</artifactId>
             <scope>runtime</scope>
         </dependency>
 
+        <!-- Lombok compile-time only. -->
         <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
             <version>${lombok.version}</version>
-            <optional>true</optional>
+            <scope>provided</scope>
         </dependency>
 
+        <!-- Boot 4 separates technology-specific test support. -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
-
-        <!-- REMOVED: webjars bootstrap, font-awesome, webjars-locator-core.
-             They served the old HTML pages. Angular now loads Bootstrap and
-             Font Awesome itself, and Spring Boot 4 no longer manages the
-             locator-core version, so keeping it would break the build. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webmvc-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa-test</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
         <plugins>
-            <!-- Run Lombok while compiling (newer JDKs don't do this automatically) -->
+            <!-- Explicit annotation processing is needed on modern JDKs. -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <configuration>
+                    <parameters>true</parameters>
                     <annotationProcessorPaths>
                         <path>
                             <groupId>org.projectlombok</groupId>
