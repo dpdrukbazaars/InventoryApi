@@ -113,8 +113,10 @@ class SecurityHttpTest {
         assertFalse(setCookie.contains("SameSite=None") && !setCookie.contains("Secure"), "a browser would drop: " + setCookie);
         assertFalse(setCookie.contains("Domain="), setCookie);
 
-        // On the real server Spring Boot writes the cookie from server.servlet.session.cookie.* (HttpOnly, SameSite=Lax,
-        // Secure on the live site). A cookie writer of our own would silently replace those settings.
+        // Spring Boot configures the session cookie using
+        // server.servlet.session.cookie.*.
+        // Cross-site HTTPS deployments require SameSite=None and Secure=true.
+        // Avoid introducing a custom cookie serializer that overrides these settings.
         var factory = ((org.springframework.context.ConfigurableApplicationContext) context).getBeanFactory();
         for (String name : factory.getBeanNamesForType(org.springframework.session.web.http.CookieSerializer.class)) {
             var definition = factory.getBeanDefinition(name);
@@ -123,7 +125,11 @@ class SecurityHttpTest {
                     "our own cookie writer: " + origin);
         }
         assertEquals("true", context.getEnvironment().getProperty("server.servlet.session.cookie.http-only"));
-        assertEquals("lax", context.getEnvironment().getProperty("server.servlet.session.cookie.same-site"));
+        assertEquals("none", context.getEnvironment()
+                .getProperty("server.servlet.session.cookie.same-site"));
+
+        assertEquals("true", context.getEnvironment()
+                .getProperty("server.servlet.session.cookie.secure"));
 
         String value = setCookie.substring("SESSION=".length(), setCookie.indexOf(';'));
         browser.perform(get("/api/auth/me").cookie(new jakarta.servlet.http.Cookie("SESSION", value)))

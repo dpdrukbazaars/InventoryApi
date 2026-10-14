@@ -52,12 +52,16 @@ public class SessionAuthenticationFilter extends OncePerRequestFilter {
             Object stamp = session.getAttribute(PASSWORD_STAMP);
             long sessionStamp = stamp instanceof Long l ? l : 0L;
             if (user == null || !user.isActive() || user.getRole() == null) {
-                session.invalidate(); // deleted or switched off: signed out now
+                session.invalidate();
+                SecurityContextHolder.clearContext();
             } else if (sessionStamp < user.passwordStamp()) {
-                session.invalidate(); // the password changed since this session signed in (reset, or changed elsewhere)
+                session.invalidate();
+                SecurityContextHolder.clearContext();
             } else {
                 String roleName = user.getRole().getName().trim().toUpperCase();
-                session.setAttribute("userRole", roleName);
+                if (!roleName.equals(session.getAttribute("userRole"))) {
+                    session.setAttribute("userRole", roleName);
+                }
 
                 List<GrantedAuthority> authorities = new ArrayList<>();
                 authorities.add(new SimpleGrantedAuthority("ROLE_" + roleName));                 // for hasRole(...)
