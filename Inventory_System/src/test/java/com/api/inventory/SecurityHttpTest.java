@@ -194,4 +194,26 @@ class SecurityHttpTest {
                         .content("{\"email\":\"karma@http.bt\",\"password\":\"secret1\"}"))
                 .andExpect(status().isForbidden());
     }
+
+    @Test
+    void corsAllowsLocalFrontendAndRejectsUnknownOrigin() throws Exception {
+
+        http.perform(options("/api/items/allItems")
+                        .header("Origin", "http://localhost:4200")
+                        .header("Access-Control-Request-Method", "GET"))
+                .andExpect(status().isOk())
+                .andExpect(header().string(
+                        "Access-Control-Allow-Origin",
+                        "http://localhost:4200"
+                ))
+                .andExpect(header().string(
+                        "Access-Control-Allow-Credentials",
+                        "true"
+                ));
+
+        http.perform(options("/api/items/allItems")
+                        .header("Origin", "https://unknown.example")
+                        .header("Access-Control-Request-Method", "GET"))
+                .andExpect(status().isForbidden());
+    }
 }
