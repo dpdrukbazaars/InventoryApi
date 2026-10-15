@@ -135,20 +135,23 @@ public class AuthController {
         return ResponseEntity.ok(toDto(user));
     }
 
+
     @GetMapping("/me")
-    public ResponseEntity<?> getMe(HttpServletRequest request) {
+    public ResponseEntity<?> getMe() {
         String email = CurrentUser.email();
-        User user = email == null ? null : userRepository.findByEmail(email).orElse(null);
+
+        User user = email == null
+                ? null
+                : userRepository.findByEmail(email).orElse(null);
+
         if (user == null || !user.isActive()) {
-            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Not authenticated");
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body("Not authenticated");
         }
-        // The role may have changed since sign-in (an admin approved a seller or rider): use the current one from now on
-        HttpSession session = request.getSession(false);
-        if (session != null) {
-            session.setAttribute("userRole", user.getRole().getName());
-        }
+
         return ResponseEntity.ok(toDto(user));
     }
+
 
     // ================= My profile: their own details and photo =================
 
