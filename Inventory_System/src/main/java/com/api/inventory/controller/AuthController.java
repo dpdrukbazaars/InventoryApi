@@ -14,6 +14,9 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpSession;
 
 import java.util.Map;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
@@ -21,6 +24,18 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.security.core.context.SecurityContext;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.web.context.HttpSessionSecurityContextRepository;
+
+
+import jakarta.servlet.http.HttpServletResponse;
+
+
+
 
 /**
  * Sign up, sign in, "who am I", sign out and change password.
@@ -107,7 +122,10 @@ public class AuthController {
     }
 
     @PostMapping("/login")
-    public ResponseEntity<?> login(@RequestBody LoginRequest request, HttpServletRequest httpRequest) {
+    public ResponseEntity<?> login(
+            @RequestBody LoginRequest request,
+            HttpServletRequest httpRequest,
+            HttpServletResponse httpResponse) {
         String email = trim(request.getEmail());
         String password = request.getPassword() == null ? "" : request.getPassword();
 
@@ -128,11 +146,55 @@ public class AuthController {
             old.invalidate();
         }
         HttpSession session = httpRequest.getSession(true);
+
         session.setAttribute("userEmail", user.getEmail());
         session.setAttribute("userRole", user.getRole().getName());
-        session.setAttribute(com.api.inventory.security.SessionAuthenticationFilter.PASSWORD_STAMP, user.passwordStamp());
+        session.setAttribute(
+                com.api.inventory.security.SessionAuthenticationFilter.PASSWORD_STAMP,
+                user.passwordStamp()
+        );
+
+// Build authentication using the user's current role and permissions.
+        String roleName = user.getRole().getName()
+                .trim()
+                .toUpperCase(Locale.ROOT);
+
+        List<GrantedAuthority> authorities = new ArrayList<>();
+        authorities.add(new SimpleGrantedAuthority("ROLE_" + roleName));
+
+        for (String permission : access.permissionsOf(roleName)) {
+            authorities.add(new SimpleGrantedAuthority(permission));
+        }
+
+        var principal = org.springframework.security.core.userdetails.User
+                .withUsername(user.getEmail())
+                .password("")
+                .authorities(authorities)
+                .build();
+
+        SecurityContext context = SecurityContextHolder.createEmptyContext();
+
+        context.setAuthentication(
+                UsernamePasswordAuthenticationToken.authenticated(
+                        principal,
+                        null,
+                        authorities
+                )
+        );
+
+        SecurityContextHolder.setContext(context);
+        // Persist authentication during login, not on each normal GET request.
+        HttpSessionSecurityContextRepository contextRepository =
+                new HttpSessionSecurityContextRepository();
+
+        contextRepository.saveContext(
+                context,
+                httpRequest,
+                httpResponse
+        );
 
         return ResponseEntity.ok(toDto(user));
+
     }
 
 
