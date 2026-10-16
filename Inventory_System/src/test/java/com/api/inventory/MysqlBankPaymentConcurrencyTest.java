@@ -409,6 +409,91 @@ class MysqlBankPaymentConcurrencyTest {
     }
 
 
+    /**
+     * Two requests for the same order must reuse the same payment intent.
+     * Uses a real local MySQL row lock and cleans up even if the assertion fails.
+     */
+    @Test
+    void simultaneousPaymentStartsReuseOneIntent() throws Exception {
+        requireLocalTestDatabase();
+
+        String unique = UUID.randomUUID().toString().substring(0, 8);
+        User customer = null;
+        Long itemId = null;
+        Long orderId = null;
+        String reference = null;
+        ExecutorService executor = null;
+        CountDownLatch releaseStart = new CountDownLatch(1);
+        boolean workersStopped = true;
+
+        try {
+            customer = createCustomer(unique);
+            itemId = createItem(unique);
+            authenticate(customer);
+            orderId = orders.createOrder(orderRequest(customer, itemId)).getOrderId();
+
+            final User paymentCustomer = customer;
+            final Long paymentOrderId = orderId;
+            CountDownLatch ready = new CountDownLatch(2);
+            executor = Executors.newFixedThreadPool(2);
+            workersStopped = false;
+
+            Callable<String> startPayment = () -> {
+                authenticate(paymentCustomer);
+                try {
+                    ready.countDown();
+                    if (!releaseStart.await(15, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("Timed out awaiting concurrent payment start");
+                    }
+                    return onlinePayments.start(paymentOrderId, "BANK").reference();
+                } finally {
+                    SecurityContextHolder.clearContext();
+                }
+            };
+
+            Future<String> first = executor.submit(startPayment);
+            Future<String> second = executor.submit(startPayment);
+            assertTrue(ready.await(15, TimeUnit.SECONDS), "Both payment threads must be ready");
+            releaseStart.countDown();
+
+            String firstReference = first.get(30, TimeUnit.SECONDS);
+            String secondReference = second.get(30, TimeUnit.SECONDS);
+            assertNotNull(firstReference);
+            reference = firstReference;
+
+            assertEquals(firstReference, secondReference,
+                    "Two concurrent payment starts must reuse the same reference");
+            List<PaymentIntent> savedIntents = intents.findByOrderIdOrderByIdDesc(orderId);
+            assertEquals(1, savedIntents.size(),
+                    "There must be exactly one payment intent for this test order");
+            assertEquals(firstReference, savedIntents.get(0).getReference());
+            assertEquals(PaymentIntent.CREATED, savedIntents.get(0).getStatus());
+            System.out.println("PASSED: Concurrent starts reused one payment intent");
+        } finally {
+            releaseStart.countDown();
+            if (executor != null) {
+                executor.shutdown();
+                if (!executor.awaitTermination(30, TimeUnit.SECONDS)) {
+                    executor.shutdownNow();
+                    if (!executor.awaitTermination(10, TimeUnit.SECONDS)) {
+                        workersStopped = false;
+                    }
+                }
+                if (executor.isTerminated()) {
+                    workersStopped = true;
+                }
+            }
+            SecurityContextHolder.clearContext();
+            if (!workersStopped) {
+                throw new IllegalStateException(
+                        "Payment start workers are still active; refusing database cleanup");
+            }
+            // Discover any extra intent if the concurrency assertion fails, and remove
+            // only records tied to the uniquely identified test order.
+            cleanupTestRecords(unique, customer, itemId, orderId, reference);
+        }
+    }
+
     // Only removes records created by this invocation. All deletes are atomic.
     private void cleanupTestRecords(String unique, User customer, Long itemId,
                                     Long orderId, String reference) throws Exception {
@@ -467,10 +552,34 @@ class MysqlBankPaymentConcurrencyTest {
                 }
             }
 
-            if (reference != null) {
-                jdbc.update("DELETE FROM payment_events WHERE intent_reference = ?", reference);
-                jdbc.update("DELETE FROM bank_payments WHERE intent_reference = ?", reference);
-                jdbc.update("DELETE FROM payment_intents WHERE reference = ?", reference);
+            // If a broken concurrent start produced multiple intents, still clean up
+            // all (and only) attempts owned by this unique test order/customer.
+            List<String> testReferences = List.of();
+            if (orderId != null) {
+                assertEquals(0L, jdbc.queryForObject(
+                                "SELECT COUNT(*) FROM payment_intents WHERE order_id = ? AND customer_email <> ?",
+                                Long.class, orderId, expectedEmail),
+                        "Unexpected payment intent owner: refusing cleanup");
+                testReferences = jdbc.queryForList(
+                        "SELECT reference FROM payment_intents WHERE order_id = ? AND customer_email = ?",
+                        String.class, orderId, expectedEmail);
+                for (String paymentReference : testReferences) {
+                    assertEquals(0L, jdbc.queryForObject(
+                                    "SELECT COUNT(*) FROM bank_payments WHERE intent_reference = ? AND order_id <> ?",
+                                    Long.class, paymentReference, orderId),
+                            "Unexpected bank-payment order: refusing cleanup");
+                }
+                assertEquals(0L, jdbc.queryForObject(
+                                "SELECT COUNT(*) FROM bank_payments WHERE order_id = ? " +
+                                        "AND intent_reference NOT IN " +
+                                        "(SELECT reference FROM payment_intents WHERE order_id = ? AND customer_email = ?)",
+                                Long.class, orderId, orderId, expectedEmail),
+                        "Unexpected bank-payment reference: refusing cleanup");
+            }
+            for (String paymentReference : testReferences) {
+                jdbc.update("DELETE FROM payment_events WHERE intent_reference = ?", paymentReference);
+                jdbc.update("DELETE FROM bank_payments WHERE intent_reference = ?", paymentReference);
+                jdbc.update("DELETE FROM payment_intents WHERE reference = ?", paymentReference);
             }
             if (orderId != null) {
                 jdbc.update("DELETE FROM order_item_batches WHERE order_item_id IN " +
