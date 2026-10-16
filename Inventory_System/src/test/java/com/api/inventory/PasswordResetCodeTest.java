@@ -1,3 +1,4 @@
+
 package com.api.inventory;
 
 import com.api.inventory.entity.User;
@@ -27,6 +28,7 @@ import java.util.regex.Pattern;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
@@ -91,6 +93,7 @@ class PasswordResetCodeTest {
 
         String ticket = JsonPath.read(verifyCode("{\"method\":\"sms\",\"phone\":\"17400001\",\"code\":\"" + code + "\"}")
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString(), "$.token");
+
         // the code works once
         verifyCode("{\"method\":\"sms\",\"phone\":\"17400001\",\"code\":\"" + code + "\"}").andExpect(status().isBadRequest());
 
@@ -99,6 +102,7 @@ class PasswordResetCodeTest {
 
         login("tashi@codes.bt", "old-secret").andExpect(status().isUnauthorized());
         login("tashi@codes.bt", "new-secret-7").andExpect(status().isOk());
+
         // the owner is told by email
         verify(email).sendEmail(eq("tashi@codes.bt"), contains("password was changed"), anyString());
     }
@@ -108,13 +112,17 @@ class PasswordResetCodeTest {
         user("sonam@codes.bt", "17400002", "old-secret");
 
         send("{\"method\":\"email\",\"email\":\"sonam@codes.bt\"}").andExpect(status().isOk());
+
         // asked again at once: the first code is still on its way, no second email
         send("{\"method\":\"email\",\"email\":\"sonam@codes.bt\"}").andExpect(status().isOk());
+
         ArgumentCaptor<String> subject = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
         verify(email, times(1)).sendEmail(eq("sonam@codes.bt"), subject.capture(), body.capture());
+
         String code = sixDigits(body.getValue());
         assertTrue(subject.getValue().startsWith(code), "the code is in the subject, to read it from the notification");
+
         Matcher link = Pattern.compile("reset-password\\?token=([A-Za-z0-9_-]+)").matcher(body.getValue());
         assertTrue(link.find(), "the email also holds a link");
 
@@ -122,45 +130,67 @@ class PasswordResetCodeTest {
         for (int i = 0; i < 5; i++) {
             verifyCode("{\"method\":\"email\",\"email\":\"sonam@codes.bt\",\"code\":\"" + wrong + "\"}").andExpect(status().isBadRequest());
         }
+
         // five wrong tries: even the right code no longer works
         verifyCode("{\"method\":\"email\",\"email\":\"sonam@codes.bt\",\"code\":\"" + code + "\"}").andExpect(status().isBadRequest());
 
         // the link still works, and after the reset it stops
-        http.perform(get("/api/auth/reset-password/check").param("token", link.group(1))).andExpect(jsonPath("$.valid").value(true));
+        http.perform(get("/api/auth/reset-password/check").param("token", link.group(1)))
+                .andExpect(jsonPath("$.valid").value(true));
+
         reset(link.group(1), "fresh-secret-3").andExpect(status().isOk());
-        http.perform(get("/api/auth/reset-password/check").param("token", link.group(1))).andExpect(jsonPath("$.valid").value(false));
+
+        http.perform(get("/api/auth/reset-password/check").param("token", link.group(1)))
+                .andExpect(jsonPath("$.valid").value(false));
+
         login("sonam@codes.bt", "fresh-secret-3").andExpect(status().isOk());
     }
 
     @Test
     void onlyTheWaysTheServerCanUseAreOffered() throws Exception {
         when(email.isAvailable()).thenReturn(false);
-        http.perform(get("/api/auth/forgot-password")).andExpect(status().isOk())
-                .andExpect(jsonPath("$.email").value(false)).andExpect(jsonPath("$.sms").value(true));
+
+        http.perform(get("/api/auth/forgot-password"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.email").value(false))
+                .andExpect(jsonPath("$.sms").value(true));
+
         send("{\"method\":\"email\",\"email\":\"someone@codes.bt\"}").andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("cannot send emails")));
+
         send("{\"method\":\"pigeon\",\"email\":\"someone@codes.bt\"}").andExpect(status().isBadRequest());
         send("{\"method\":\"sms\",\"phone\":\"1234\"}").andExpect(status().isBadRequest());
+
         verify(email, never()).sendEmail(anyString(), anyString(), anyString());
     }
 
     // ================= Helpers =================
 
     private ResultActions send(String json) throws Exception {
-        return http.perform(post("/api/auth/forgot-password").contentType(MediaType.APPLICATION_JSON).content(json));
+        return http.perform(post("/api/auth/forgot-password")
+                .with(csrf())
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(json));
     }
 
     private ResultActions verifyCode(String json) throws Exception {
-        return http.perform(post("/api/auth/forgot-password/verify").contentType(MediaType.APPLICATION_JSON).content(json));
+        return http.perform(post("/api/auth/forgot-password/verify")
+                .with(csrf())
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(json));
     }
 
     private ResultActions reset(String token, String password) throws Exception {
-        return http.perform(post("/api/auth/reset-password").contentType(MediaType.APPLICATION_JSON)
+        return http.perform(post("/api/auth/reset-password")
+                .with(csrf())
+                .contentType(MediaType.APPLICATION_JSON)
                 .content("{\"token\":\"" + token + "\",\"newPassword\":\"" + password + "\"}"));
     }
 
     private ResultActions login(String email, String password) throws Exception {
-        return http.perform(post("/api/auth/login").contentType(MediaType.APPLICATION_JSON)
+        return http.perform(post("/api/auth/login")
+                .with(csrf())
+                .contentType(MediaType.APPLICATION_JSON)
                 .content("{\"email\":\"" + email + "\",\"password\":\"" + password + "\"}"));
     }
 

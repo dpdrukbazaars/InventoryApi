@@ -39,6 +39,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
 /**
@@ -90,16 +91,16 @@ class GoLiveFeaturesTest {
         User u = user("dawa@golive.bt", "USER", "17300001", "old-secret");
         when(email.isAvailable()).thenReturn(true); // the server can send emails
 
-        MockHttpSession oldSession = (MockHttpSession) http.perform(post("/api/auth/login").contentType(MediaType.APPLICATION_JSON)
+        MockHttpSession oldSession = (MockHttpSession) http.perform(post("/api/auth/login").with(csrf()).contentType(MediaType.APPLICATION_JSON)
                         .content("{\"email\":\"dawa@golive.bt\",\"password\":\"old-secret\"}"))
                 .andExpect(status().isOk()).andReturn().getRequest().getSession(false);
 
         // an unknown email gets the same answer, and no email is sent
-        http.perform(post("/api/auth/forgot-password").contentType(MediaType.APPLICATION_JSON).content("{\"email\":\"nobody@golive.bt\"}"))
+        http.perform(post("/api/auth/forgot-password").with(csrf()).contentType(MediaType.APPLICATION_JSON).content("{\"email\":\"nobody@golive.bt\"}"))
                 .andExpect(status().isOk());
         verify(email, never()).sendEmail(eq("nobody@golive.bt"), anyString(), anyString());
 
-        http.perform(post("/api/auth/forgot-password").contentType(MediaType.APPLICATION_JSON).content("{\"email\":\"dawa@golive.bt\"}"))
+        http.perform(post("/api/auth/forgot-password").with(csrf()).contentType(MediaType.APPLICATION_JSON).content("{\"email\":\"dawa@golive.bt\"}"))
                 .andExpect(status().isOk());
         ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
         verify(email).sendEmail(eq("dawa@golive.bt"), contains("new password"), body.capture());
@@ -111,20 +112,20 @@ class GoLiveFeaturesTest {
         http.perform(get("/api/auth/reset-password/check").param("token", "made-up")).andExpect(jsonPath("$.valid").value(false));
 
         // too short: refused, the link still works
-        http.perform(post("/api/auth/reset-password").contentType(MediaType.APPLICATION_JSON)
+        http.perform(post("/api/auth/reset-password").with(csrf()).contentType(MediaType.APPLICATION_JSON)
                 .content("{\"token\":\"" + token + "\",\"newPassword\":\"abc\"}")).andExpect(status().is4xxClientError());
-        http.perform(post("/api/auth/reset-password").contentType(MediaType.APPLICATION_JSON)
+        http.perform(post("/api/auth/reset-password").with(csrf()).contentType(MediaType.APPLICATION_JSON)
                 .content("{\"token\":\"" + token + "\",\"newPassword\":\"new-secret-9\"}")).andExpect(status().isOk());
 
         // the link works once
-        http.perform(post("/api/auth/reset-password").contentType(MediaType.APPLICATION_JSON)
+        http.perform(post("/api/auth/reset-password").with(csrf()).contentType(MediaType.APPLICATION_JSON)
                 .content("{\"token\":\"" + token + "\",\"newPassword\":\"another-one-1\"}")).andExpect(status().is4xxClientError());
 
         // the browser that was signed in before is signed out; only the new password works
         http.perform(get("/api/auth/me").session(oldSession)).andExpect(status().isUnauthorized());
-        http.perform(post("/api/auth/login").contentType(MediaType.APPLICATION_JSON)
+        http.perform(post("/api/auth/login").with(csrf()).contentType(MediaType.APPLICATION_JSON)
                 .content("{\"email\":\"dawa@golive.bt\",\"password\":\"old-secret\"}")).andExpect(status().isUnauthorized());
-        http.perform(post("/api/auth/login").contentType(MediaType.APPLICATION_JSON)
+        http.perform(post("/api/auth/login").with(csrf()).contentType(MediaType.APPLICATION_JSON)
                 .content("{\"email\":\"dawa@golive.bt\",\"password\":\"new-secret-9\"}")).andExpect(status().isOk());
         assertNotNull(users.findById(u.getId()).orElseThrow().getPasswordChangedAt());
     }
@@ -202,7 +203,7 @@ class GoLiveFeaturesTest {
     @Test
     void onlyRealPhotosAreAccepted() {
         assertThrows(IllegalStateException.class, () -> ProductPhotos.check(
-                new MockMultipartFile("image", "photo.jpg", "image/jpeg", "this is text, not a photo".getBytes())),
+                        new MockMultipartFile("image", "photo.jpg", "image/jpeg", "this is text, not a photo".getBytes())),
                 "the name says .jpg, the content does not");
         assertDoesNotThrow(() -> ProductPhotos.check(new MockMultipartFile("image", "x.png", "image/png",
                 new byte[] {(byte) 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0})));

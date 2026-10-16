@@ -24,6 +24,7 @@ import java.util.List;
 
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.*;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
@@ -76,20 +77,20 @@ class SiteAboutTest {
                 .andExpect(jsonPath("$.defaults['about.mission']", containsString("mission")));
 
         // the texts
-        http.perform(put("/api/site/admin/about").session(admin).contentType(MediaType.APPLICATION_JSON)
+        http.perform(put("/api/site/admin/about").with(csrf()).session(admin).contentType(MediaType.APPLICATION_JSON)
                 .content("{\"intro\":\"\",\"mission\":\"m\",\"vision\":\"v\"}")).andExpect(status().isBadRequest());
-        http.perform(put("/api/site/admin/about").session(admin).contentType(MediaType.APPLICATION_JSON)
+        http.perform(put("/api/site/admin/about").with(csrf()).session(admin).contentType(MediaType.APPLICATION_JSON)
                         .content("{\"intro\":\"We are a Thimphu marketplace.\",\"mission\":\"Simple shopping.\",\"vision\":\"Every town.\",\"showNumbers\":false}"))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.updatedBy").value("owner@site.bt"));
         http.perform(get("/api/site/about")).andExpect(jsonPath("$.intro").value("We are a Thimphu marketplace."))
                 .andExpect(jsonPath("$.showNumbers").value(false)).andExpect(jsonPath("$.numbers").doesNotExist());
 
         // the team: a photo is checked by its content, and stored under the person's own name
-        http.perform(multipart("/api/site/admin/team").file(new MockMultipartFile("photo", "me.png", "image/png", "not a picture".getBytes()))
+        http.perform(multipart("/api/site/admin/team").with(csrf()).file(new MockMultipartFile("photo", "me.png", "image/png", "not a picture".getBytes()))
                 .param("name", "Sonam").param("role", "Packer").session(admin)).andExpect(status().isBadRequest());
-        http.perform(multipart("/api/site/admin/team").param("name", " ").param("role", "Packer").session(admin))
+        http.perform(multipart("/api/site/admin/team").with(csrf()).param("name", " ").param("role", "Packer").session(admin))
                 .andExpect(status().isBadRequest());
-        String body = http.perform(multipart("/api/site/admin/team").file(new MockMultipartFile("photo", "me.png", "image/png", PNG))
+        String body = http.perform(multipart("/api/site/admin/team").with(csrf()).file(new MockMultipartFile("photo", "me.png", "image/png", PNG))
                         .param("name", "Sonam Wangmo").param("role", "Packing and delivery").param("bio", "Packs every order with care.")
                         .session(admin))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
@@ -98,27 +99,27 @@ class SiteAboutTest {
         assertTrue(photo.startsWith("/uploads/team-" + sonam + "-") && photo.endsWith(".png"), photo);
         http.perform(get(photo)).andExpect(status().isOk());
 
-        Integer pema = JsonPath.read(http.perform(multipart("/api/site/admin/team").param("name", "Pema").param("role", "Accounts")
+        Integer pema = JsonPath.read(http.perform(multipart("/api/site/admin/team").with(csrf()).param("name", "Pema").param("role", "Accounts")
                 .param("visible", "false").session(admin)).andReturn().getResponse().getContentAsString(), "$.id");
         // hidden people are not on the page
         http.perform(get("/api/site/about")).andExpect(jsonPath("$.team[*].name", hasItem("Sonam Wangmo")))
                 .andExpect(jsonPath("$.team[*].name", not(hasItem("Pema"))));
 
         // a different order; a stale list is refused
-        http.perform(put("/api/site/admin/team/order").session(admin).contentType(MediaType.APPLICATION_JSON)
+        http.perform(put("/api/site/admin/team/order").with(csrf()).session(admin).contentType(MediaType.APPLICATION_JSON)
                 .content("{\"ids\":[" + sonam + "]}")).andExpect(status().isBadRequest());
-        http.perform(put("/api/site/admin/team/order").session(admin).contentType(MediaType.APPLICATION_JSON)
+        http.perform(put("/api/site/admin/team/order").with(csrf()).session(admin).contentType(MediaType.APPLICATION_JSON)
                         .content("{\"ids\":[" + pema + "," + sonam + "]}"))
                 .andExpect(status().isOk()).andExpect(jsonPath("$[0].name").value("Pema"));
 
         // back to initials: the uploaded photo is deleted
-        http.perform(multipart(HttpMethod.PUT, "/api/site/admin/team/" + sonam).param("name", "Sonam Wangmo")
+        http.perform(multipart(HttpMethod.PUT, "/api/site/admin/team/" + sonam).with(csrf()).param("name", "Sonam Wangmo")
                         .param("role", "Packing").param("removePhoto", "true").session(admin))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.photo").doesNotExist()).andExpect(jsonPath("$.role").value("Packing"));
         http.perform(get(photo)).andExpect(status().isNotFound());
 
-        http.perform(delete("/api/site/admin/team/" + pema).session(manager)).andExpect(status().isForbidden());
-        http.perform(delete("/api/site/admin/team/" + pema).session(admin)).andExpect(status().isOk());
+        http.perform(delete("/api/site/admin/team/" + pema).with(csrf()).session(manager)).andExpect(status().isForbidden());
+        http.perform(delete("/api/site/admin/team/" + pema).with(csrf()).session(admin)).andExpect(status().isOk());
         List<String> names = JsonPath.read(http.perform(get("/api/site/admin/about").session(admin))
                 .andReturn().getResponse().getContentAsString(), "$.team[*].name");
         assertEquals(List.of("Sonam Wangmo"), names);
@@ -138,17 +139,17 @@ class SiteAboutTest {
 
         String good = "{\"phone\":\"17 11 22 33\",\"email\":\"hello@drukbazaars.bt\",\"address\":\"Norzin Lam, Thimphu\","
                 + "\"facebook\":\"\",\"instagram\":\"https://www.instagram.com/drukbazaars\",\"youtube\":\"\",\"tiktok\":\"\"}";
-        http.perform(put("/api/site/admin/info").contentType(MediaType.APPLICATION_JSON).content(good)).andExpect(status().isUnauthorized());
-        http.perform(put("/api/site/admin/info").session(manager).contentType(MediaType.APPLICATION_JSON).content(good)).andExpect(status().isForbidden());
+        http.perform(put("/api/site/admin/info").with(csrf()).contentType(MediaType.APPLICATION_JSON).content(good)).andExpect(status().isUnauthorized());
+        http.perform(put("/api/site/admin/info").with(csrf()).session(manager).contentType(MediaType.APPLICATION_JSON).content(good)).andExpect(status().isForbidden());
         // a link must be a full https address; the phone digits; the email an email
-        http.perform(put("/api/site/admin/info").session(admin).contentType(MediaType.APPLICATION_JSON)
+        http.perform(put("/api/site/admin/info").with(csrf()).session(admin).contentType(MediaType.APPLICATION_JSON)
                 .content(good.replace("https://www.instagram.com/drukbazaars", "javascript:alert(1)"))).andExpect(status().isBadRequest());
-        http.perform(put("/api/site/admin/info").session(admin).contentType(MediaType.APPLICATION_JSON)
+        http.perform(put("/api/site/admin/info").with(csrf()).session(admin).contentType(MediaType.APPLICATION_JSON)
                 .content(good.replace("17 11 22 33", "call us"))).andExpect(status().isBadRequest());
-        http.perform(put("/api/site/admin/info").session(admin).contentType(MediaType.APPLICATION_JSON)
+        http.perform(put("/api/site/admin/info").with(csrf()).session(admin).contentType(MediaType.APPLICATION_JSON)
                 .content(good.replace("hello@drukbazaars.bt", "hello"))).andExpect(status().isBadRequest());
 
-        http.perform(put("/api/site/admin/info").session(admin).contentType(MediaType.APPLICATION_JSON).content(good))
+        http.perform(put("/api/site/admin/info").with(csrf()).session(admin).contentType(MediaType.APPLICATION_JSON).content(good))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.address").value("Norzin Lam, Thimphu"));
         // an emptied link stays empty (the Facebook icon goes away), the new one shows
         http.perform(get("/api/site/info"))
@@ -158,7 +159,7 @@ class SiteAboutTest {
     }
 
     private MockHttpSession signIn(MockMvc http, User u) throws Exception {
-        return (MockHttpSession) http.perform(post("/api/auth/login").contentType(MediaType.APPLICATION_JSON)
+        return (MockHttpSession) http.perform(post("/api/auth/login").with(csrf()).contentType(MediaType.APPLICATION_JSON)
                         .content("{\"email\":\"" + u.getEmail() + "\",\"password\":\"secret-1\"}"))
                 .andExpect(status().isOk()).andReturn().getRequest().getSession(false);
     }

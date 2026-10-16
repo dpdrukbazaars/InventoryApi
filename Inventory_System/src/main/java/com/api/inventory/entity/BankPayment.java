@@ -15,7 +15,7 @@ import java.time.Instant;
  * Stored: the bank, the LAST 4 digits of the account, the gateway's transaction number and what happened.
  * Never stored: the full account number or the one-time code.
  *
- *   STARTED -> CODE_SENT -> PAID
+ *   STARTED -> CODE_SENT -> DEBIT_PENDING -> PAID | CHECK_BANK
  *                   \-----> FAILED (wrong code 3 times, refused by the bank) | CANCELLED | EXPIRED
  */
 @Entity
@@ -35,6 +35,8 @@ public class BankPayment {
     public static final String EXPIRED = "EXPIRED";
     /** The bank was asked to take the money but its answer never came: staff check with the bank before anything else. */
     public static final String CHECK_BANK = "CHECK_BANK";
+    /** Durable reservation made before sending a debit request to the bank. */
+    public static final String DEBIT_PENDING = "DEBIT_PENDING";
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -68,11 +70,14 @@ public class BankPayment {
     @Column(length = 80)
     private String bankReference;
 
-    @Column(nullable = false, length = 12)
+    @Column(nullable = false, length = 16)
     private String status = STARTED;
 
     private Instant codeSentAt;
     private Instant codeExpiresAt;
+
+    /** Written and committed BEFORE sending the debit request. */
+    private Instant debitRequestedAt;
 
     /** How many times a code was sent (limited, so nobody can flood the customer's phone). */
     @Column(nullable = false)

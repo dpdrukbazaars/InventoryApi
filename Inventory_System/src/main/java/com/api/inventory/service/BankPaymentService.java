@@ -65,6 +65,10 @@ public class BankPaymentService {
     private record Outcome(BankView view, PaymentGateway.Result result) {
     }
 
+    /** A previously committed reservation, or a result that needs no external bank call. */
+    private record DebitPreparation(Outcome immediate, String gatewayTransactionId) {
+    }
+
     private final PaymentIntentRepository intents;
     private final BankPaymentRepository bankPayments;
     private final PaymentEventRepository events;
@@ -158,7 +162,11 @@ public class BankPaymentService {
         return finish(reference, outcome);
     }
 
-    /** Step 2: the code approves the debit. On success the order is confirmed. */
+    /**
+     * Step 2: commit DEBIT_PENDING first, then call the bank OUTSIDE any DB transaction.
+     * If the process crashes after the call, the durable pending state prevents another debit.
+     * Staff must verify an unknown outcome with the bank; never retry a debit automatically.
+     */
     public BankView pay(String reference, String code) {
         onlinePayments.status(reference); // checks who is asking
         BankGatewayClient client = client();
@@ -167,63 +175,116 @@ public class BankPaymentService {
             throw new IllegalArgumentException("Enter the code from the text message (digits only).");
         }
 
-        Outcome outcome = tx.execute(status -> {
-            PaymentIntent intent = openIntent(reference);
+        DebitPreparation preparation = tx.execute(status -> {
+            PaymentIntent intent = openIntent(reference); // locks intent
             BankPayment bp = bankPayments.findByIntentReferenceForUpdate(intent.getReference())
                     .orElseThrow(() -> new IllegalStateException("Ask for a code first."));
             if (BankPayment.PAID.equals(bp.getStatus())) {
-                // paid at the bank but the order step did not finish last time: finish it now (safe to repeat)
-                return new Outcome(null, paidResult(intent, bp));
+                // Bank paid but process stopped before finishing order: no second debit.
+                return new DebitPreparation(new Outcome(null, paidResult(intent, bp)), null);
             }
-            if (BankPayment.CHECK_BANK.equals(bp.getStatus())) {
-                throw new IllegalStateException("We are checking this payment with your bank. Please do not pay again.");
+            if (BankPayment.DEBIT_PENDING.equals(bp.getStatus()) || BankPayment.CHECK_BANK.equals(bp.getStatus())) {
+                throw new IllegalStateException("The bank debit is processing or awaiting verification. Do not pay again.");
             }
             if (!BankPayment.CODE_SENT.equals(bp.getStatus())) {
                 throw new IllegalStateException("Ask for a code first.");
             }
             if (bp.getCodeExpiresAt() != null && bp.getCodeExpiresAt().isBefore(Instant.now())) {
                 record(intent.getReference(), "CODE_EXPIRED", "CODE_EXPIRED", null);
-                return new Outcome(view(intent, bp, "The code has expired. Ask for a new code."), null);
+                return new DebitPreparation(new Outcome(view(intent, bp, "The code has expired. Ask for a new code."), null), null);
             }
+            if (bp.getGatewayTransactionId() == null || bp.getGatewayTransactionId().isBlank()) {
+                throw new IllegalStateException("Bank transaction number is missing. Ask staff for assistance.");
+            }
+            bp.setStatus(BankPayment.DEBIT_PENDING);
+            bp.setDebitRequestedAt(Instant.now());
+            bankPayments.save(bp);
+            record(intent.getReference(), "DEBIT_REQUESTED", "PENDING", "Gateway transaction " + bp.getGatewayTransactionId());
+            return new DebitPreparation(null, bp.getGatewayTransactionId());
+        }); // DEBIT_PENDING is committed before the network call
 
-            Answer answer = client.debit(bp.getGatewayTransactionId(), given);
-            if (answer.ok()) {
+        if (preparation.immediate() != null) {
+            return finish(reference, preparation.immediate());
+        }
+
+        Answer answer;
+        try {
+            answer = client.debit(preparation.gatewayTransactionId(), given);
+        } catch (RuntimeException e) {
+            // Unexpected client failure after sending a debit: money might have moved.
+            // Don't log the exception message: it could contain confidential gateway data.
+            answer = Answer.no("NO_ANSWER", "The bank's result could not be confirmed.");
+        }
+        if (answer == null) {
+            answer = Answer.no("NO_ANSWER", "The bank's result could not be confirmed.");
+        }
+        final Answer bankAnswer = answer;
+
+        Outcome outcome = tx.execute(status -> {
+            PaymentIntent intent = intents.findByReferenceForUpdate(reference == null ? "" : reference.trim())
+                    .orElseThrow(() -> new IllegalStateException("Payment not found."));
+            BankPayment bp = bankPayments.findByIntentReferenceForUpdate(intent.getReference())
+                    .orElseThrow(() -> new IllegalStateException("Payment not found."));
+            if (!BankPayment.DEBIT_PENDING.equals(bp.getStatus())) {
+                // Staff may have reconciled an old request; never overwrite a final result.
+                if (BankPayment.PAID.equals(bp.getStatus()) && !intent.isFinal()) {
+                    return new Outcome(null, paidResult(intent, bp));
+                }
+                return new Outcome(view(intent, bp, null), null);
+            }
+            if (bankAnswer.ok()) {
                 bp.setStatus(BankPayment.PAID);
-                bp.setBankReference(answer.reference());
+                bp.setBankReference(bankAnswer.reference());
                 bp.setCompletedAt(Instant.now());
                 bankPayments.save(bp);
                 record(intent.getReference(), "PAID", "OK", bp.getBankName() + ", account ending " + bp.getAccountLast4()
-                        + (answer.reference() == null ? "" : ", journal " + answer.reference()));
+                        + (bankAnswer.reference() == null ? "" : ", journal " + bankAnswer.reference()));
                 return new Outcome(null, paidResult(intent, bp));
             }
-            if ("NO_ANSWER".equals(answer.code())) {
+            if ("NO_ANSWER".equals(bankAnswer.code())) {
                 bp.setStatus(BankPayment.CHECK_BANK);
                 bankPayments.save(bp);
-                record(intent.getReference(), "NO_ANSWER", answer.code(), answer.message());
+                record(intent.getReference(), "NO_ANSWER", bankAnswer.code(), bankAnswer.message());
                 notify.withPermission("payments.verify", new NotificationService.Note("BANK_PAYMENT_TO_CHECK",
                         "Check a bank payment for order #" + intent.getOrderId(),
-                        "The bank did not answer when asked to take Nu. " + intent.getAmount() + " from " + bp.getBankName()
+                        "The bank's debit result is unknown for Nu. " + intent.getAmount() + " from " + bp.getBankName()
                                 + " account ending " + bp.getAccountLast4() + " (gateway transaction " + bp.getGatewayTransactionId()
-                                + "). Ask the bank whether the money came, then settle it in Order verification.",
+                                + "). Verify with the bank before allowing another payment.",
                         "/order-verification"), true);
                 return new Outcome(view(intent, bp, null), null);
             }
-            if ("WRONG_CODE".equals(answer.code())) {
+            if ("WRONG_CODE".equals(bankAnswer.code())) {
                 bp.setWrongCodes(bp.getWrongCodes() + 1);
-                record(intent.getReference(), "WRONG_CODE", answer.code(), null);
+                record(intent.getReference(), "WRONG_CODE", bankAnswer.code(), null);
                 if (bp.getWrongCodes() < MAX_WRONG) {
+                    bp.setStatus(BankPayment.CODE_SENT);
                     bankPayments.save(bp);
                     int left = MAX_WRONG - bp.getWrongCodes();
-                    return new Outcome(view(intent, bp, "That code is not right. " + left + (left == 1 ? " try" : " tries") + " left."), null);
+                    return new Outcome(view(intent, bp, "That code is not right. " + left
+                            + (left == 1 ? " try" : " tries") + " left."), null);
                 }
                 return new Outcome(null, fail(bp, "The code was wrong 3 times, so the payment was stopped. Nothing was taken."));
             }
-            if ("CODE_EXPIRED".equals(answer.code())) {
-                record(intent.getReference(), "CODE_EXPIRED", answer.code(), null);
+            if ("CODE_EXPIRED".equals(bankAnswer.code())) {
+                bp.setStatus(BankPayment.CODE_SENT);
+                bankPayments.save(bp);
+                record(intent.getReference(), "CODE_EXPIRED", bankAnswer.code(), null);
                 return new Outcome(view(intent, bp, "The code has expired. Ask for a new code."), null);
             }
-            record(intent.getReference(), "REFUSED", answer.code(), answer.message());
-            return new Outcome(null, fail(bp, answer.message() == null ? "The bank refused the payment." : answer.message()));
+            if ("INSUFFICIENT_FUNDS".equals(bankAnswer.code()) || "REFUSED".equals(bankAnswer.code())) {
+                record(intent.getReference(), "REFUSED", bankAnswer.code(), bankAnswer.message());
+                return new Outcome(null, fail(bp, bankAnswer.message() == null ? "The bank refused the payment." : bankAnswer.message()));
+            }
+            // Unknown / unrecognized debit responses are never evidence that no money moved.
+            bp.setStatus(BankPayment.CHECK_BANK);
+            bankPayments.save(bp);
+            record(intent.getReference(), "UNKNOWN_DEBIT_RESULT", bankAnswer.code(), null);
+            notify.withPermission("payments.verify", new NotificationService.Note("BANK_PAYMENT_TO_CHECK",
+                    "Check a bank payment for order #" + intent.getOrderId(),
+                    "The bank returned an unrecognized debit result for gateway transaction "
+                            + bp.getGatewayTransactionId() + ". Confirm the result with the bank before another payment.",
+                    "/order-verification"), true);
+            return new Outcome(view(intent, bp, null), null);
         });
         return finish(reference, outcome);
     }
@@ -232,10 +293,11 @@ public class BankPaymentService {
 
     public List<ToCheck> toCheck() {
         requireVerifier();
-        return bankPayments.findByStatusOrderByCreatedAtAsc(BankPayment.CHECK_BANK).stream().map(bp -> {
+        return bankPayments.findByStatusInOrderByCreatedAtAsc(
+                List.of(BankPayment.DEBIT_PENDING, BankPayment.CHECK_BANK)).stream().map(bp -> {
             PaymentIntent intent = intents.findByReference(bp.getIntentReference()).orElse(null);
             return new ToCheck(bp.getIntentReference(), bp.getOrderId(), bp.getAmount(), intent == null ? null : intent.getCustomerEmail(),
-                    bp.getBankName(), bp.getAccountLast4(), bp.getGatewayTransactionId(), bp.getCodeSentAt());
+                    bp.getBankName(), bp.getAccountLast4(), bp.getGatewayTransactionId(), bp.getDebitRequestedAt());
         }).toList();
     }
 
@@ -254,8 +316,13 @@ public class BankPaymentService {
                     .orElseThrow(() -> new IllegalStateException("Payment not found."));
             BankPayment bp = bankPayments.findByIntentReferenceForUpdate(intent.getReference())
                     .orElseThrow(() -> new IllegalStateException("Payment not found."));
-            if (!BankPayment.CHECK_BANK.equals(bp.getStatus())) {
+            if (!BankPayment.CHECK_BANK.equals(bp.getStatus()) && !BankPayment.DEBIT_PENDING.equals(bp.getStatus())) {
                 throw new IllegalStateException("This payment does not need checking any more.");
+            }
+            // Allow an in-flight bank call time to finish before staff can settle it.
+            if (BankPayment.DEBIT_PENDING.equals(bp.getStatus()) && bp.getDebitRequestedAt() != null
+                    && bp.getDebitRequestedAt().isAfter(Instant.now().minus(Duration.ofMinutes(5)))) {
+                throw new IllegalStateException("The debit was requested recently. Please wait before reconciling it with the bank.");
             }
             if (paid) {
                 bp.setStatus(BankPayment.PAID);
@@ -333,6 +400,14 @@ public class BankPaymentService {
         } else if (intent.isFinal() && (BankPayment.STARTED.equals(status) || BankPayment.CODE_SENT.equals(status))) {
             status = PaymentIntent.CANCELLED.equals(intent.getStatus()) ? BankPayment.CANCELLED
                     : PaymentIntent.EXPIRED.equals(intent.getStatus()) ? BankPayment.EXPIRED : BankPayment.FAILED;
+        }
+        if (BankPayment.DEBIT_PENDING.equals(status)) {
+            // Existing Angular page already knows how to display CHECK_BANK.
+            status = BankPayment.CHECK_BANK;
+            if (message == null) {
+                message = "The bank debit is being processed or its result is not yet known. "
+                        + "Do not pay again; staff will reconcile it if necessary.";
+            }
         }
         if (BankPayment.CHECK_BANK.equals(status) && message == null) {
             message = "Your bank did not confirm the payment in time. Please do not pay again: we are checking with the bank "

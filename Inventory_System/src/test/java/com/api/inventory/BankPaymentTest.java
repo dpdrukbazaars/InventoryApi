@@ -31,11 +31,14 @@ import org.springframework.web.context.WebApplicationContext;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
 /**
@@ -49,6 +52,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "spring.datasource.password=",
         "spring.jpa.hibernate.ddl-auto=create-drop",
         "spring.flyway.enabled=false",
+        "spring.session.jdbc.initialize-schema=always",
         "spring.jpa.show-sql=false",
         "app.private-upload-dir=target/test-private-uploads",
         "app.payments.bank.mode=test",
@@ -132,7 +136,11 @@ class BankPaymentTest {
         assertTrue(row.isTestMode());
         assertEquals(1, row.getCodesSent());
         List<String> steps = eventRepo.findByIntentReferenceOrderByAtAsc(ref).stream().map(PaymentEvent::getStep).toList();
-        assertEquals(List.of("STARTED", "CODE_REQUESTED", "CODE_SENT", "PAID"), steps);
+        assertEquals(List.of("STARTED",
+                "CODE_REQUESTED",
+                "CODE_SENT",
+                "DEBIT_REQUESTED",
+                "PAID"), steps);
 
         // paying again changes nothing
         assertThrows(IllegalStateException.class, () -> bank.pay(ref, "123456"));
@@ -312,22 +320,120 @@ class BankPaymentTest {
 
         http.perform(get("/api/online-payments/bank/" + ref)).andExpect(status().isUnauthorized());
 
-        MockHttpSession session = (MockHttpSession) http.perform(post("/api/auth/login").contentType(MediaType.APPLICATION_JSON)
+        MockHttpSession session = (MockHttpSession) http.perform(post("/api/auth/login").with(csrf()).contentType(MediaType.APPLICATION_JSON)
                         .content("{\"email\":\"kinley@bank.bt\",\"password\":\"secret-1\"}"))
                 .andExpect(status().isOk()).andReturn().getRequest().getSession(false);
 
         http.perform(get("/api/online-payments/bank/banks").session(session))
                 .andExpect(status().isOk()).andExpect(jsonPath("$[0].code").value("1010"));
-        http.perform(post("/api/online-payments/bank/" + ref + "/code").session(session).contentType(MediaType.APPLICATION_JSON)
+        http.perform(post("/api/online-payments/bank/" + ref + "/code").with(csrf()).session(session).contentType(MediaType.APPLICATION_JSON)
                         .content("{\"bankCode\":\"1040\",\"accountNumber\":\"200300404321\"}"))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.status").value("CODE_SENT"))
                 .andExpect(jsonPath("$.accountLast4").value("4321")).andExpect(jsonPath("$.testCode").value("123456"));
-        http.perform(post("/api/online-payments/bank/" + ref + "/pay").session(session).contentType(MediaType.APPLICATION_JSON)
+        http.perform(post("/api/online-payments/bank/" + ref + "/pay").with(csrf()).session(session).contentType(MediaType.APPLICATION_JSON)
                         .content("{\"code\":\"12\"}"))
                 .andExpect(status().is4xxClientError());
-        http.perform(post("/api/online-payments/bank/" + ref + "/pay").session(session).contentType(MediaType.APPLICATION_JSON)
+        http.perform(post("/api/online-payments/bank/" + ref + "/pay").with(csrf()).session(session).contentType(MediaType.APPLICATION_JSON)
                         .content("{\"code\":\"123456\"}"))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.status").value("PAID"));
+    }
+
+    /**
+     * Simulates a restart after DEBIT_PENDING was durably committed, but before a
+     * gateway result was saved. A second Pay, new code, cancel, replacement, and
+     * scheduled expiry must all leave the unresolved debit alone.
+     */
+    @Test
+    void aPendingDebitCannotBeRetriedCancelledReplacedOrExpired() {
+        User customer = user("pending@bank.bt", "USER");
+        as(customer);
+        String ref = startFor(customer);
+        bank.requestCode(ref, "1010", ACCOUNT);
+
+        BankPayment row = bankPaymentRepo.findByIntentReference(ref).orElseThrow();
+        row.setStatus(BankPayment.DEBIT_PENDING);
+        row.setDebitRequestedAt(Instant.now().minus(Duration.ofHours(2)));
+        bankPaymentRepo.saveAndFlush(row);
+
+        PaymentIntent attempt = intentRepo.findByReference(ref).orElseThrow();
+        Long orderId = attempt.getOrderId();
+        attempt.setCreatedAt(Instant.now().minus(Duration.ofHours(2)));
+        intentRepo.saveAndFlush(attempt);
+
+        long debitEventsBefore = eventRepo.findByIntentReferenceOrderByAtAsc(ref).stream()
+                .filter(e -> "DEBIT_REQUESTED".equals(e.getStep())).count();
+
+        assertEquals(BankPayment.CHECK_BANK, bank.view(ref).status(),
+                "the customer must be warned that a debit might have occurred");
+        assertThrows(IllegalStateException.class, () -> bank.pay(ref, "123456"),
+                "the app must not send the same debit again");
+        assertThrows(IllegalStateException.class, () -> bank.requestCode(ref, "1010", ACCOUNT),
+                "a new code must not reopen a debit in progress");
+        assertThrows(IllegalStateException.class, () -> onlinePayments.cancel(ref),
+                "an uncertain debit must not be cancelled");
+        assertThrows(IllegalStateException.class, () -> onlinePayments.start(orderId, "BANK"),
+                "an uncertain debit must not be replaced by another payment attempt");
+
+        onlinePayments.expireOld();
+        assertEquals(PaymentIntent.CREATED, intentRepo.findByReference(ref).orElseThrow().getStatus(),
+                "the scheduled expiry must not close an uncertain debit");
+        assertEquals(BankPayment.DEBIT_PENDING,
+                bankPaymentRepo.findByIntentReference(ref).orElseThrow().getStatus());
+        assertEquals("PENDING", orderRepo.findById(orderId).orElseThrow().getPaymentStatus(),
+                "payment must not be confirmed without a bank result");
+        assertEquals(debitEventsBefore, eventRepo.findByIntentReferenceOrderByAtAsc(ref).stream()
+                .filter(e -> "DEBIT_REQUESTED".equals(e.getStep())).count(),
+                "no second debit request event should be recorded");
+
+        // This test manually created DEBIT_PENDING and NEVER called the gateway.
+        // Close the artificial pending attempt so it cannot affect other tests
+        // sharing the same in-memory H2 database.
+        as(user("pending-cleanup@bank.bt", "ADMIN"));
+        assertEquals(BankPayment.FAILED, bank.settle(ref, false, null).status(),
+                "cleanup: no simulated bank debit was ever sent");
+        assertTrue(bank.toCheck().stream().noneMatch(p -> ref.equals(p.reference())),
+                "cleanup must remove the artificial pending attempt from staff's queue");
+    }
+
+    /**
+     * An abandoned DEBIT_PENDING debit appears for staff reconciliation, but
+     * staff must wait for a recent in-flight call to finish. Simulates staff
+     * verifying a successful bank debit by entering its journal number.
+     */
+    @Test
+    void staffCanReconcileAnAbandonedDebitReservation() {
+        User customer = user("unfinished@bank.bt", "USER");
+        User admin = user("reconciler@bank.bt", "ADMIN");
+        as(customer);
+        String ref = startFor(customer);
+        bank.requestCode(ref, "1010", ACCOUNT);
+
+        BankPayment row = bankPaymentRepo.findByIntentReference(ref).orElseThrow();
+        row.setStatus(BankPayment.DEBIT_PENDING);
+        row.setDebitRequestedAt(Instant.now());
+        bankPaymentRepo.saveAndFlush(row);
+
+        assertThrows(AccessDeniedException.class, () -> bank.toCheck(),
+                "only authorized staff can see pending debits");
+        as(admin);
+        assertTrue(bank.toCheck().stream().anyMatch(p -> ref.equals(p.reference())),
+                "an orphaned debit must be visible to staff");
+        assertThrows(IllegalStateException.class, () -> bank.settle(ref, true, "BOB 99887766"),
+                "staff must not settle a newly in-flight bank request");
+
+        BankPayment aged = bankPaymentRepo.findByIntentReference(ref).orElseThrow();
+        aged.setDebitRequestedAt(Instant.now().minus(Duration.ofMinutes(10)));
+        bankPaymentRepo.saveAndFlush(aged);
+
+        BankView settled = bank.settle(ref, true, "bob 99887766");
+        assertEquals(BankPayment.PAID, settled.status());
+        assertEquals("BOB 99887766", bankPaymentRepo.findByIntentReference(ref).orElseThrow().getBankReference());
+        assertEquals(PaymentIntent.PAID, intentRepo.findByReference(ref).orElseThrow().getStatus());
+        assertEquals("PAID", orderRepo.findById(settled.orderId()).orElseThrow().getPaymentStatus());
+        assertEquals("CONFIRMED", orderRepo.findById(settled.orderId()).orElseThrow().getOrderStatus());
+        assertTrue(bank.toCheck().stream().noneMatch(p -> ref.equals(p.reference())));
+        assertThrows(IllegalStateException.class, () -> bank.settle(ref, true, "BOB 99887766"),
+                "settling an already reconciled debit a second time must be rejected");
     }
 
     // ================= Helpers =================

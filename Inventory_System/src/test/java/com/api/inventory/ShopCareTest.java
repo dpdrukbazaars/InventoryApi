@@ -23,6 +23,7 @@ import java.time.Instant;
 
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.*;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
@@ -67,26 +68,26 @@ class ShopCareTest {
         MockHttpSession pema = signIn(http, person("pema@care.bt", "17910001", "USER"));
         MockHttpSession other = signIn(http, person("other@care.bt", "17910002", "USER"));
 
-        http.perform(post("/api/addresses").session(pema).contentType(MediaType.APPLICATION_JSON)
-                .content("{\"label\":\"Home\",\"phone\":\"17910001\",\"address\":\"Blue gate, Motithang\",\"latitude\":27.48,\"longitude\":89.63,\"pointLabel\":\"Your current location\"}"))
+        http.perform(post("/api/addresses").with(csrf()).session(pema).contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"label\":\"Home\",\"phone\":\"17910001\",\"address\":\"Blue gate, Motithang\",\"latitude\":27.48,\"longitude\":89.63,\"pointLabel\":\"Your current location\"}"))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.isDefault").value(true)); // the first one
-        String office = http.perform(post("/api/addresses").session(pema).contentType(MediaType.APPLICATION_JSON)
+        String office = http.perform(post("/api/addresses").with(csrf()).session(pema).contentType(MediaType.APPLICATION_JSON)
                         .content("{\"label\":\"Office\",\"phone\":\"17910009\",\"address\":\"Norzin Lam, 2nd floor\",\"makeDefault\":true}"))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
         Long officeId = Long.valueOf(office.replaceAll(".*\"id\":(\\d+).*", "$1"));
-        http.perform(post("/api/addresses").session(pema).contentType(MediaType.APPLICATION_JSON)
+        http.perform(post("/api/addresses").with(csrf()).session(pema).contentType(MediaType.APPLICATION_JSON)
                 .content("{\"label\":\"Bad\",\"phone\":\"123\",\"address\":\"x\"}")).andExpect(status().isBadRequest());
         // somewhere outside Bhutan is not kept as a map point
-        http.perform(post("/api/addresses").session(pema).contentType(MediaType.APPLICATION_JSON)
+        http.perform(post("/api/addresses").with(csrf()).session(pema).contentType(MediaType.APPLICATION_JSON)
                         .content("{\"label\":\"Far\",\"phone\":\"17910001\",\"address\":\"Somewhere\",\"latitude\":51.5,\"longitude\":-0.1}"))
                 .andExpect(jsonPath("$.latitude").doesNotExist());
 
         http.perform(get("/api/addresses").session(pema)).andExpect(jsonPath("$", hasSize(3)))
                 .andExpect(jsonPath("$[0].label").value("Office")).andExpect(jsonPath("$[0].isDefault").value(true));
         http.perform(get("/api/addresses").session(other)).andExpect(jsonPath("$", hasSize(0)));
-        http.perform(delete("/api/addresses/" + officeId).session(other)).andExpect(status().isBadRequest());
+        http.perform(delete("/api/addresses/" + officeId).with(csrf()).session(other)).andExpect(status().isBadRequest());
         // removing the default: another one becomes the default
-        http.perform(delete("/api/addresses/" + officeId).session(pema)).andExpect(status().isOk())
+        http.perform(delete("/api/addresses/" + officeId).with(csrf()).session(pema)).andExpect(status().isOk())
                 .andExpect(jsonPath("$", hasSize(2))).andExpect(jsonPath("$[0].isDefault").value(true));
     }
 
@@ -97,8 +98,8 @@ class ShopCareTest {
         MockHttpSession session = signIn(http, karma);
         Long ghee = product("CARE-GHEE", "Cow ghee", "250.00").getItemId();
 
-        http.perform(post("/api/stock-alerts/" + ghee).session(session)).andExpect(status().isOk());
-        http.perform(post("/api/stock-alerts/" + ghee).session(session)).andExpect(status().isOk()); // twice: one alert
+        http.perform(post("/api/stock-alerts/" + ghee).with(csrf()).session(session)).andExpect(status().isOk());
+        http.perform(post("/api/stock-alerts/" + ghee).with(csrf()).session(session)).andExpect(status().isOk()); // twice: one alert
         http.perform(get("/api/stock-alerts").session(session)).andExpect(jsonPath("$", contains(ghee.intValue())));
 
         stock.receive(ghee, 6, new BigDecimal("200.00"), null, null, null, null, "Arrived");
@@ -132,13 +133,13 @@ class ShopCareTest {
                 .andExpect(jsonPath("$.lines[0].itemName").value("Red rice"));
 
         String ask = "{\"reason\":\"DAMAGED\",\"details\":\"The bag was torn\",\"items\":[{\"orderItemId\":" + line + ",\"quantity\":%d}]}";
-        http.perform(post("/api/orders/" + done.getOrderId() + "/return-request").session(customer).contentType(MediaType.APPLICATION_JSON)
+        http.perform(post("/api/orders/" + done.getOrderId() + "/return-request").with(csrf()).session(customer).contentType(MediaType.APPLICATION_JSON)
                 .content(ask.formatted(4))).andExpect(status().isBadRequest()); // more than bought
-        String made = http.perform(post("/api/orders/" + done.getOrderId() + "/return-request").session(customer).contentType(MediaType.APPLICATION_JSON)
+        String made = http.perform(post("/api/orders/" + done.getOrderId() + "/return-request").with(csrf()).session(customer).contentType(MediaType.APPLICATION_JSON)
                         .content(ask.formatted(2)))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.status").value("REQUESTED")).andReturn().getResponse().getContentAsString();
         Long requestId = Long.valueOf(made.replaceAll("^\\{\"id\":(\\d+).*", "$1"));
-        http.perform(post("/api/orders/" + done.getOrderId() + "/return-request").session(customer).contentType(MediaType.APPLICATION_JSON)
+        http.perform(post("/api/orders/" + done.getOrderId() + "/return-request").with(csrf()).session(customer).contentType(MediaType.APPLICATION_JSON)
                 .content(ask.formatted(1))).andExpect(status().isBadRequest()); // one open request at a time
         assertTrue(notifications.latest("admin@care.bt", 10).stream().anyMatch(n -> "RETURN_REQUEST".equals(n.type())));
 
@@ -146,16 +147,16 @@ class ShopCareTest {
         http.perform(get("/api/return-requests").session(customer)).andExpect(status().isForbidden());
         http.perform(get("/api/return-requests").session(admin)).andExpect(jsonPath("$[0].id").value(requestId))
                 .andExpect(jsonPath("$[0].customerEmail").value("sonam@care.bt")).andExpect(jsonPath("$[0].lines[0].quantity").value(2));
-        http.perform(post("/api/return-requests/" + requestId + "/decline").session(admin).contentType(MediaType.APPLICATION_JSON)
+        http.perform(post("/api/return-requests/" + requestId + "/decline").with(csrf()).session(admin).contentType(MediaType.APPLICATION_JSON)
                 .content("{}")).andExpect(status().isBadRequest()); // a reason is needed
-        http.perform(post("/api/return-requests/" + requestId + "/approve").session(admin).contentType(MediaType.APPLICATION_JSON)
+        http.perform(post("/api/return-requests/" + requestId + "/approve").with(csrf()).session(admin).contentType(MediaType.APPLICATION_JSON)
                 .content("{\"note\":\"Our rider collects it tomorrow.\"}")).andExpect(jsonPath("$.status").value("APPROVED"));
         assertTrue(notifications.latest("sonam@care.bt", 10).stream()
                 .anyMatch(n -> "RETURN_APPROVED".equals(n.type()) && n.body().equals("Our rider collects it tomorrow.")));
 
         // staff record the return: the request is done and the customer hears the amount
-        http.perform(post("/api/orders/" + done.getOrderId() + "/returns").session(admin).contentType(MediaType.APPLICATION_JSON)
-                .content("{\"reason\":\"DAMAGED\",\"refundMethod\":\"ORIGINAL\",\"items\":[{\"orderItemId\":" + line + ",\"quantity\":2,\"restock\":false}]}"))
+        http.perform(post("/api/orders/" + done.getOrderId() + "/returns").with(csrf()).session(admin).contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"reason\":\"DAMAGED\",\"refundMethod\":\"ORIGINAL\",\"items\":[{\"orderItemId\":" + line + ",\"quantity\":2,\"restock\":false}]}"))
                 .andExpect(status().isOk());
         http.perform(get("/api/orders/" + done.getOrderId() + "/return-request").session(customer))
                 .andExpect(jsonPath("$.requests[0].status").value("DONE")).andExpect(jsonPath("$.requests[0].customerEmail").doesNotExist())
@@ -232,8 +233,9 @@ class ShopCareTest {
     }
 
     private MockHttpSession signIn(MockMvc http, User u) throws Exception {
-        return (MockHttpSession) http.perform(post("/api/auth/login").contentType(MediaType.APPLICATION_JSON)
+        return (MockHttpSession) http.perform(post("/api/auth/login").with(csrf()).contentType(MediaType.APPLICATION_JSON)
                         .content("{\"email\":\"" + u.getEmail() + "\",\"password\":\"secret-1\"}"))
                 .andExpect(status().isOk()).andReturn().getRequest().getSession(false);
     }
 }
+

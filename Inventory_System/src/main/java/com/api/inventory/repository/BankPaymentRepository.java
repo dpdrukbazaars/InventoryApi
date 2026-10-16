@@ -18,6 +18,12 @@ public interface BankPaymentRepository extends JpaRepository<BankPayment, Long> 
 
     List<BankPayment> findByStatusOrderByCreatedAtAsc(String status);
 
+    /** Staff need both unknown results and requests interrupted before saving a result. */
+    List<BankPayment> findByStatusInOrderByCreatedAtAsc(List<String> statuses);
+
+    /** Exclude any bank debit in progress, uncertain, or already collected. */
+    boolean existsByIntentReferenceAndStatusIn(String intentReference, List<String> statuses);
+
     /** The bank payment that paid this order (for the receipt). */
     Optional<BankPayment> findFirstByOrderIdAndStatusOrderByIdDesc(Long orderId, String status);
 

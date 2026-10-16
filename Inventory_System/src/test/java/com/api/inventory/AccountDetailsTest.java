@@ -23,6 +23,7 @@ import org.springframework.web.context.WebApplicationContext;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
@@ -61,58 +62,104 @@ class AccountDetailsTest {
         MockHttpSession manager = signIn(http, staff("manager@acc.bt", "MANAGER", "17800002"), "secret-1");
         staff("taken@acc.bt", "USER", "17800009");
 
-        // a customer signs up (customer record + accepted terms), and gets a notification
+        // A customer signs up (customer record + accepted terms), and gets a notification.
         int terms = legal.current("CUSTOMER").getVersion();
-        http.perform(post("/api/auth/signup").contentType(MediaType.APPLICATION_JSON).content(
-                "{\"name\":\"Karma Dorji\",\"email\":\"karma.old@acc.bt\",\"phone\":\"17800003\",\"password\":\"karma-pass\",\"acceptedTermsVersion\":" + terms + "}"))
+        http.perform(post("/api/auth/signup")
+                        .with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"Karma Dorji\",\"email\":\"karma.old@acc.bt\",\"phone\":\"17800003\",\"password\":\"karma-pass\",\"acceptedTermsVersion\":" + terms + "}"))
                 .andExpect(status().isOk());
         User karma = users.findByEmail("karma.old@acc.bt").orElseThrow();
         notifications.user("karma.old@acc.bt", new NotificationService.Note("TEST", "Hello", "A note", "/"), false);
         MockHttpSession karmaOld = signIn(http, karma, "karma-pass");
 
         String body = "{\"name\":\"Karma Tshering Dorji\",\"email\":\"karma.new@acc.bt\",\"phone\":\"17800004\"}";
-        // only people managers, and not for their own account
-        http.perform(put("/api/admin/users/" + karma.getId()).session(manager).contentType(MediaType.APPLICATION_JSON).content(body))
-                .andExpect(status().isForbidden());
-        Long ownerId = users.findByEmail("owner@acc.bt").orElseThrow().getId();
-        http.perform(put("/api/admin/users/" + ownerId).session(admin).contentType(MediaType.APPLICATION_JSON)
-                .content("{\"name\":\"Owner\",\"email\":\"owner2@acc.bt\",\"phone\":\"17800001\"}")).andExpect(status().isForbidden());
-        // another account's email or phone, a bad phone: refused
-        http.perform(put("/api/admin/users/" + karma.getId()).session(admin).contentType(MediaType.APPLICATION_JSON)
-                .content(body.replace("karma.new@acc.bt", "TAKEN@acc.bt"))).andExpect(status().is4xxClientError());
-        http.perform(put("/api/admin/users/" + karma.getId()).session(admin).contentType(MediaType.APPLICATION_JSON)
-                .content(body.replace("17800004", "17800009"))).andExpect(status().is4xxClientError());
-        http.perform(put("/api/admin/users/" + karma.getId()).session(admin).contentType(MediaType.APPLICATION_JSON)
-                .content(body.replace("17800004", "1234"))).andExpect(status().is4xxClientError());
 
-        http.perform(put("/api/admin/users/" + karma.getId()).session(admin).contentType(MediaType.APPLICATION_JSON).content(body))
+        // Only people managers, and not for their own account.
+        http.perform(put("/api/admin/users/" + karma.getId())
+                        .with(csrf())
+                        .session(manager)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isForbidden());
+
+        Long ownerId = users.findByEmail("owner@acc.bt").orElseThrow().getId();
+        http.perform(put("/api/admin/users/" + ownerId)
+                        .with(csrf())
+                        .session(admin)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"Owner\",\"email\":\"owner2@acc.bt\",\"phone\":\"17800001\"}"))
+                .andExpect(status().isForbidden());
+
+        // Another account's email or phone, and a bad phone: refused.
+        http.perform(put("/api/admin/users/" + karma.getId())
+                        .with(csrf())
+                        .session(admin)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body.replace("karma.new@acc.bt", "TAKEN@acc.bt")))
+                .andExpect(status().is4xxClientError());
+
+        http.perform(put("/api/admin/users/" + karma.getId())
+                        .with(csrf())
+                        .session(admin)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body.replace("17800004", "17800009")))
+                .andExpect(status().is4xxClientError());
+
+        http.perform(put("/api/admin/users/" + karma.getId())
+                        .with(csrf())
+                        .session(admin)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body.replace("17800004", "1234")))
+                .andExpect(status().is4xxClientError());
+
+        http.perform(put("/api/admin/users/" + karma.getId())
+                        .with(csrf())
+                        .session(admin)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.email").value("karma.new@acc.bt"))
                 .andExpect(jsonPath("$.phone").value("17800004"))
                 .andExpect(jsonPath("$.name").value("Karma Tshering Dorji"));
 
-        // what Karma owns came along
+        // What Karma owns came along.
         assertTrue(legal.hasAcceptedCurrent("karma.new@acc.bt", "CUSTOMER"), "the accepted terms follow the new email");
         assertEquals(1, notifications.latest("karma.new@acc.bt", 10).size(), "so do the notifications");
         var record = customers.findAll().stream().filter(c -> karma.getId().equals(c.getUserId())).findFirst().orElseThrow();
         assertEquals("karma.new@acc.bt", record.getEmail());
         assertEquals("17800004", record.getPhone());
 
-        // the old sign-in has ended; the new email works with the same password, the old one does not
-        http.perform(get("/api/auth/me").session(karmaOld)).andExpect(status().isUnauthorized());
-        http.perform(post("/api/auth/login").contentType(MediaType.APPLICATION_JSON)
-                .content("{\"email\":\"karma.old@acc.bt\",\"password\":\"karma-pass\"}")).andExpect(status().isUnauthorized());
-        http.perform(post("/api/auth/login").contentType(MediaType.APPLICATION_JSON)
-                .content("{\"email\":\"karma.new@acc.bt\",\"password\":\"karma-pass\"}")).andExpect(status().isOk());
-        // both addresses are told
+        // The old sign-in has ended; the new email works with the same password, the old one does not.
+        http.perform(get("/api/auth/me").session(karmaOld))
+                .andExpect(status().isUnauthorized());
+
+        http.perform(post("/api/auth/login")
+                        .with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"email\":\"karma.old@acc.bt\",\"password\":\"karma-pass\"}"))
+                .andExpect(status().isUnauthorized());
+
+        http.perform(post("/api/auth/login")
+                        .with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"email\":\"karma.new@acc.bt\",\"password\":\"karma-pass\"}"))
+                .andExpect(status().isOk());
+
+        // Both addresses are told.
         verify(email).sendEmail(eq("karma.old@acc.bt"), contains("sign-in email was changed"), anyString());
         verify(email).sendEmail(eq("karma.new@acc.bt"), contains("sign-in email was changed"), anyString());
     }
 
     private MockHttpSession signIn(MockMvc http, User u, String password) throws Exception {
-        return (MockHttpSession) http.perform(post("/api/auth/login").contentType(MediaType.APPLICATION_JSON)
+        return (MockHttpSession) http.perform(post("/api/auth/login")
+                        .with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"email\":\"" + u.getEmail() + "\",\"password\":\"" + password + "\"}"))
-                .andExpect(status().isOk()).andReturn().getRequest().getSession(false);
+                .andExpect(status().isOk())
+                .andReturn()
+                .getRequest()
+                .getSession(false);
     }
 
     private User staff(String emailAddress, String role, String phone) {

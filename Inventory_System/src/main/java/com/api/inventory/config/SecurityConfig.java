@@ -31,8 +31,16 @@ public class SecurityConfig {
                 // Use the CorsConfigurationSource bean from CorsConfig (allows the Angular dev server)
                 .cors(Customizer.withDefaults())
 
-                // Angular sends JSON with the session cookie (SameSite=Lax); CSRF tokens are not used
-                .csrf(csrf -> csrf.disable())
+                // Require CSRF tokens for browser requests that change data.
+                // Exclude payment gateway callbacks because they use
+                // server-to-server signature verification instead.
+                .csrf(csrf -> csrf
+                        .ignoringRequestMatchers(
+                                request ->
+                                        "POST".equalsIgnoreCase(request.getMethod())
+                                                && request.getRequestURI()
+                                                .matches(".*/api/online-payments/callback/[^/]+$")
+                        ))
 
                 // Login is our own /api/auth/login; the session is created there
                 .formLogin(form -> form.disable())
@@ -43,6 +51,9 @@ public class SecurityConfig {
                 .addFilterBefore(new SessionAuthenticationFilter(users, access), AnonymousAuthenticationFilter.class)
 
                 .authorizeHttpRequests(auth -> auth
+                        // Angular needs a CSRF token before signing in.
+                        .requestMatchers(HttpMethod.GET, "/api/auth/csrf").permitAll()
+
                         // public: signing in and up
                         .requestMatchers("/api/auth/login", "/api/auth/signup", "/api/auth/logout", "/api/auth/me",
                                 "/api/auth/forgot-password", "/api/auth/forgot-password/verify", "/api/auth/reset-password",

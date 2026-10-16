@@ -99,7 +99,11 @@ public class OnlinePaymentService {
     @Transactional
     public StartResult start(Long orderId, String providerCode) {
         PaymentGateway gateway = gateway(providerCode);
-        Order order = orders.findById(orderId == null ? -1L : orderId).orElseThrow(() -> new IllegalStateException("Order not found."));
+        Order order = orders.findByIdForPaymentUpdate(
+                orderId == null ? -1L : orderId
+        ).orElseThrow(() ->
+                new IllegalStateException("Order not found.")
+        );
         String me = CurrentUser.email();
         if (me == null || order.getCustomerEmail() == null || !order.getCustomerEmail().equalsIgnoreCase(me)) {
             throw new AccessDeniedException("You can only pay for your own orders.");
@@ -123,10 +127,10 @@ public class OnlinePaymentService {
         // pressing Pay again uses the same open attempt, so the gateway never sees two live payments for one order
         Instant now = Instant.now();
         for (PaymentIntent open : intents.findByOrderIdOrderByIdDesc(orderId)) {
-            if (PaymentIntent.CREATED.equals(open.getStatus())
-                    && bankPayments.existsByIntentReferenceAndStatus(open.getReference(), BankPayment.CHECK_BANK)) {
-                throw new IllegalStateException("We are checking your earlier payment for this order with your bank. "
-                        + "Please do not pay again: your order is updated as soon as the bank answers.");
+            if (bankPayments.existsByIntentReferenceAndStatusIn(open.getReference(),
+                    List.of(BankPayment.DEBIT_PENDING, BankPayment.CHECK_BANK, BankPayment.PAID))) {
+                throw new IllegalStateException("A bank debit for this order is being processed or checked. "
+                        + "Please do not pay again until it has been reconciled.");
             }
             if (PaymentIntent.CREATED.equals(open.getStatus())) {
                 boolean reusable = open.getProvider().equals(gateway.code()) && open.getAmount().compareTo(amount) == 0
@@ -195,8 +199,10 @@ public class OnlinePaymentService {
     @Transactional
     public void cancel(String reference) {
         intents.findByReferenceForUpdate(reference).ifPresent(intent -> {
-            if (bankPayments.existsByIntentReferenceAndStatus(intent.getReference(), BankPayment.CHECK_BANK)) {
-                throw new IllegalStateException("We are checking this payment with your bank, so it cannot be cancelled now.");
+            if (bankPayments.existsByIntentReferenceAndStatusIn(intent.getReference(),
+                    List.of(BankPayment.DEBIT_PENDING, BankPayment.CHECK_BANK, BankPayment.PAID))) {
+                throw new IllegalStateException("A bank debit may have completed. This attempt cannot be cancelled "
+                        + "until the bank confirms the result.");
             }
             if (!intent.isFinal()) {
                 intent.setStatus(PaymentIntent.CANCELLED);

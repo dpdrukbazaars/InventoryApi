@@ -34,6 +34,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:mysql://127.0.0.1:3306/inventory_session_test?serverTimezone=UTC",
@@ -102,6 +103,7 @@ class MysqlHttpSessionConcurrencyTest {
             // Log in using the actual authentication endpoint.
             var loginResponse = browser.perform(
                             post("/api/auth/login")
+                                    .with(csrf())
                                     .contentType(MediaType.APPLICATION_JSON)
                                     .content(
                                             "{\"email\":\"" + email

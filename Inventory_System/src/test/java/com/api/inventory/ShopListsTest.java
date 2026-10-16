@@ -22,6 +22,7 @@ import org.springframework.web.context.WebApplicationContext;
 import java.math.BigDecimal;
 
 import static org.hamcrest.Matchers.*;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
@@ -61,17 +62,24 @@ class ShopListsTest {
         MockHttpSession dorji = signIn(http, person("dorji@lists.bt", "17900002"));
 
         http.perform(get("/api/wishlist")).andExpect(status().isUnauthorized());
-        http.perform(post("/api/wishlist/" + tea).session(pema)).andExpect(status().isOk()).andExpect(jsonPath("$.itemId").value(tea));
-        http.perform(post("/api/wishlist/" + tea).session(pema)).andExpect(status().isOk()); // twice: still one
-        http.perform(post("/api/wishlist/" + rice).session(pema)).andExpect(status().isOk());
-        http.perform(post("/api/wishlist/999999").session(pema)).andExpect(status().isBadRequest());
+        http.perform(post("/api/wishlist/" + tea).with(csrf()).session(pema))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.itemId").value(tea));
+        http.perform(post("/api/wishlist/" + tea).with(csrf()).session(pema))
+                .andExpect(status().isOk()); // twice: still one
+        http.perform(post("/api/wishlist/" + rice).with(csrf()).session(pema))
+                .andExpect(status().isOk());
+        http.perform(post("/api/wishlist/999999").with(csrf()).session(pema))
+                .andExpect(status().isBadRequest());
 
         http.perform(get("/api/wishlist").session(pema)).andExpect(jsonPath("$", hasSize(2)))
                 .andExpect(jsonPath("$[0].itemId").value(rice)); // newest first
         http.perform(get("/api/wishlist").session(dorji)).andExpect(jsonPath("$", hasSize(0)));
-        http.perform(delete("/api/wishlist/" + tea).session(dorji)).andExpect(status().isOk()); // not theirs: nothing happens
-        http.perform(delete("/api/wishlist/" + tea).session(pema)).andExpect(status().isOk());
-        http.perform(get("/api/wishlist").session(pema)).andExpect(jsonPath("$", hasSize(1))).andExpect(jsonPath("$[0].itemId").value(rice));
+        http.perform(delete("/api/wishlist/" + tea).with(csrf()).session(dorji))
+                .andExpect(status().isOk()); // not theirs: nothing happens
+        http.perform(delete("/api/wishlist/" + tea).with(csrf()).session(pema))
+                .andExpect(status().isOk());
+        http.perform(get("/api/wishlist").session(pema)).andExpect(jsonPath("$", hasSize(1)))
+                .andExpect(jsonPath("$[0].itemId").value(rice));
     }
 
     @Test
@@ -115,7 +123,9 @@ class ShopListsTest {
     }
 
     private MockHttpSession signIn(MockMvc http, User u) throws Exception {
-        return (MockHttpSession) http.perform(post("/api/auth/login").contentType(MediaType.APPLICATION_JSON)
+        return (MockHttpSession) http.perform(post("/api/auth/login")
+                        .with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"email\":\"" + u.getEmail() + "\",\"password\":\"secret-1\"}"))
                 .andExpect(status().isOk()).andReturn().getRequest().getSession(false);
     }

@@ -11,8 +11,18 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+import jakarta.persistence.LockModeType;
+import org.springframework.data.jpa.repository.Lock;
+import java.util.Optional;
+
 @Repository
 public interface OrderRepository extends JpaRepository<Order, Long> {
+
+	@Lock(LockModeType.PESSIMISTIC_WRITE)
+	@Query("select o from Order o where o.orderId = :orderId")
+	Optional<Order> findByIdForPaymentUpdate(
+			@Param("orderId") Long orderId
+	);
 
 	List<Order> findByCustomerEmail(String customerEmail);
 	List<Order> findAllByOrderByCreatedAtDesc();
@@ -58,5 +68,7 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
 		        ORDER BY DATE(o.createdAt) DESC
 		        """)
 		    List<SalesReportDTO> findSalesReportByDateRange(@Param("start") LocalDateTime start,
+
+
 		                                                   @Param("end") LocalDateTime end);
 	}

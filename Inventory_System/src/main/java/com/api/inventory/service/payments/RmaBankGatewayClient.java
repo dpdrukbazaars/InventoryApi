@@ -123,8 +123,11 @@ public class RmaBankGatewayClient implements BankGatewayClient {
         this.banks = banks;
         this.transport = transport;
         if (rmaKey == null) {
-            log.warn("RMA payments: app.payments.bank.rma.public-key is not set, so RMA's answers are not signature-checked "
-                    + "(the https connection still is). Add RMA's public key from the merchant kit.");
+            throw new IllegalStateException(
+                    "RMA public key is required. " +
+                            "Configure app.payments.bank.rma.public-key " +
+                            "before enabling real payments."
+            );
         }
     }
 
@@ -238,13 +241,19 @@ public class RmaBankGatewayClient implements BankGatewayClient {
         Map<String, String> signed = new LinkedHashMap<>(fields);
         signed.put("bfs_checkSum", sign(fields, merchantKey));
         Map<String, String> answer = transport.post(url, signed);
-        if (rmaKey != null) {
-            String checksum = answer.get("bfs_checkSum");
-            Map<String, String> rest = new TreeMap<>(answer);
-            rest.remove("bfs_checkSum");
-            if (checksum == null || !verify(rest, checksum, rmaKey)) {
-                throw new GeneralSecurityException("RMA's answer failed its signature check");
-            }
+        if (answer == null) {
+            throw new GeneralSecurityException("RMA returned no response.");
+        }
+
+        String checksum = answer.get("bfs_checkSum");
+
+        Map<String, String> rest = new TreeMap<>(answer);
+        rest.remove("bfs_checkSum");
+
+        if (checksum == null || !verify(rest, checksum, rmaKey)) {
+            throw new GeneralSecurityException(
+                    "RMA's answer failed its signature check"
+            );
         }
         log.info("RMA {} {} -> {} {}", fields.get("bfs_msgType"), fields.getOrDefault("bfs_bfsTxnId", fields.get("bfs_orderNo")),
                 answer.get("bfs_msgType"), answer.getOrDefault("bfs_debitAuthCode", answer.get("bfs_responseCode")));

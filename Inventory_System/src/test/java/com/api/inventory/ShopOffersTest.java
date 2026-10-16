@@ -32,6 +32,7 @@ import java.util.List;
 
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.*;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
@@ -84,12 +85,12 @@ class ShopOffersTest {
         MockHttpSession customer = signIn(http, person("buyer@offers.bt", "17920002", "USER"));
         Long tea = item("Suja tea", "120.00", 10, null).getItemId();
 
-        http.perform(put("/api/items/" + tea + "/highlight").session(customer).contentType(MediaType.APPLICATION_JSON)
+        http.perform(put("/api/items/" + tea + "/highlight").with(csrf()).session(customer).contentType(MediaType.APPLICATION_JSON)
                 .content("{\"highlight\":\"DEAL\"}")).andExpect(status().isForbidden());
-        http.perform(put("/api/items/" + tea + "/highlight").session(admin).contentType(MediaType.APPLICATION_JSON)
+        http.perform(put("/api/items/" + tea + "/highlight").with(csrf()).session(admin).contentType(MediaType.APPLICATION_JSON)
                 .content("{\"highlight\":\"DEAL\",\"dealEndsAt\":\"2020-01-01T00:00:00Z\"}")).andExpect(status().isBadRequest());
-        http.perform(put("/api/items/" + tea + "/highlight").session(admin).contentType(MediaType.APPLICATION_JSON)
-                .content("{\"highlight\":\"DEAL\",\"dealEndsAt\":\"" + Instant.now().plusSeconds(3600) + "\"}"))
+        http.perform(put("/api/items/" + tea + "/highlight").with(csrf()).session(admin).contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"highlight\":\"DEAL\",\"dealEndsAt\":\"" + Instant.now().plusSeconds(3600) + "\"}"))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.highlight").value("DEAL"));
         http.perform(get("/api/items/allItems")).andExpect(jsonPath("$[?(@.itemId == " + tea + ")].highlight").value("DEAL"));
 
@@ -98,7 +99,7 @@ class ShopOffersTest {
         saved.setDealEndsAt(Instant.now().minusSeconds(60));
         items.save(saved);
         http.perform(get("/api/items/allItems")).andExpect(jsonPath("$[?(@.itemId == " + tea + ")].highlight").value(contains(nullValue())));
-        http.perform(put("/api/items/" + tea + "/highlight").session(admin).contentType(MediaType.APPLICATION_JSON)
+        http.perform(put("/api/items/" + tea + "/highlight").with(csrf()).session(admin).contentType(MediaType.APPLICATION_JSON)
                 .content("{\"highlight\":\"FEATURED\"}")).andExpect(jsonPath("$.highlight").value("FEATURED")).andExpect(jsonPath("$.dealEndsAt").doesNotExist());
     }
 
@@ -109,23 +110,23 @@ class ShopOffersTest {
         Long kira = item("Kira", "2500.00", 3, null).getItemId();
 
         // the first photo of a product without one becomes its main photo
-        http.perform(multipart("/api/items/" + kira + "/photos").file(jpg()).session(admin)).andExpect(jsonPath("$", hasSize(0)));
+        http.perform(multipart("/api/items/" + kira + "/photos").with(csrf()).file(jpg()).session(admin)).andExpect(jsonPath("$", hasSize(0)));
         String main = items.findById(kira).orElseThrow().getImagePath();
         assertTrue(main.startsWith("/uploads/item-" + kira + "-"));
         for (int i = 0; i < 4; i++) {
-            http.perform(multipart("/api/items/" + kira + "/photos").file(jpg()).session(admin)).andExpect(status().isOk());
+            http.perform(multipart("/api/items/" + kira + "/photos").with(csrf()).file(jpg()).session(admin)).andExpect(status().isOk());
         }
-        http.perform(multipart("/api/items/" + kira + "/photos").file(jpg()).session(admin)).andExpect(status().isBadRequest()); // 5 in all
-        http.perform(multipart("/api/items/" + kira + "/photos")
+        http.perform(multipart("/api/items/" + kira + "/photos").with(csrf()).file(jpg()).session(admin)).andExpect(status().isBadRequest()); // 5 in all
+        http.perform(multipart("/api/items/" + kira + "/photos").with(csrf())
                 .file(new MockMultipartFile("photo", "x.txt", "text/plain", "hello".getBytes())).session(admin)).andExpect(status().isBadRequest());
 
         String list = http.perform(get("/api/items/" + kira)).andExpect(jsonPath("$.photos", hasSize(4))).andReturn().getResponse().getContentAsString();
         Long first = Long.valueOf(list.replaceAll("(?s).*\"photos\":\\[\\{\"id\":(\\d+).*", "$1"));
         String firstPath = list.replaceAll("(?s).*\"photos\":\\[\\{\"id\":\\d+,\"path\":\"([^\"]+)\".*", "$1");
-        http.perform(post("/api/items/" + kira + "/photos/" + first + "/main").session(admin))
+        http.perform(post("/api/items/" + kira + "/photos/" + first + "/main").with(csrf()).session(admin))
                 .andExpect(jsonPath("$[0].path").value(main)); // the old main photo takes its place
         assertEquals(firstPath, items.findById(kira).orElseThrow().getImagePath());
-        http.perform(delete("/api/items/" + kira + "/photos/" + first).session(admin)).andExpect(jsonPath("$", hasSize(3)));
+        http.perform(delete("/api/items/" + kira + "/photos/" + first).with(csrf()).session(admin)).andExpect(jsonPath("$", hasSize(3)));
     }
 
     @Test
@@ -158,19 +159,19 @@ class ShopOffersTest {
         Long rice = item("Red rice", "200.00", 20, null).getItemId();
 
         String form = "{\"code\":\"%s\",\"kind\":\"PERCENT\",\"value\":10,\"minOrder\":300,\"maxDiscount\":50,\"perCustomerLimit\":1,\"description\":\"Losar\"}";
-        http.perform(post("/api/coupons/admin").session(buyerSession).contentType(MediaType.APPLICATION_JSON)
+        http.perform(post("/api/coupons/admin").with(csrf()).session(buyerSession).contentType(MediaType.APPLICATION_JSON)
                 .content(form.formatted("DRUK10"))).andExpect(status().isForbidden());
-        http.perform(post("/api/coupons/admin").session(adminSession).contentType(MediaType.APPLICATION_JSON)
+        http.perform(post("/api/coupons/admin").with(csrf()).session(adminSession).contentType(MediaType.APPLICATION_JSON)
                 .content(form.formatted("dr uk"))).andExpect(status().isBadRequest());
-        http.perform(post("/api/coupons/admin").session(adminSession).contentType(MediaType.APPLICATION_JSON)
+        http.perform(post("/api/coupons/admin").with(csrf()).session(adminSession).contentType(MediaType.APPLICATION_JSON)
                 .content(form.formatted("druk10"))).andExpect(status().isOk()).andExpect(jsonPath("$.code").value("DRUK10"));
 
         String cart = "{\"code\":\"druk10\",\"items\":[{\"itemId\":" + rice + ",\"quantity\":%d}]}";
-        http.perform(post("/api/coupons/check").session(buyerSession).contentType(MediaType.APPLICATION_JSON).content(cart.formatted(1)))
+        http.perform(post("/api/coupons/check").with(csrf()).session(buyerSession).contentType(MediaType.APPLICATION_JSON).content(cart.formatted(1)))
                 .andExpect(status().isBadRequest()).andExpect(jsonPath("$.message").value(containsString("at least Nu. 300.00")));
-        http.perform(post("/api/coupons/check").session(buyerSession).contentType(MediaType.APPLICATION_JSON).content(cart.formatted(2)))
+        http.perform(post("/api/coupons/check").with(csrf()).session(buyerSession).contentType(MediaType.APPLICATION_JSON).content(cart.formatted(2)))
                 .andExpect(jsonPath("$.discount").value(40.0)); // 10% of 400
-        http.perform(post("/api/coupons/check").session(buyerSession).contentType(MediaType.APPLICATION_JSON).content(cart.formatted(5)))
+        http.perform(post("/api/coupons/check").with(csrf()).session(buyerSession).contentType(MediaType.APPLICATION_JSON).content(cart.formatted(5)))
                 .andExpect(jsonPath("$.discount").value(50.0)); // 10% of 1000, at most 50
 
         // the order: items 400 - 40, collected (no delivery fee)
@@ -256,7 +257,7 @@ class ShopOffersTest {
     }
 
     private MockHttpSession signIn(MockMvc http, User u) throws Exception {
-        return (MockHttpSession) http.perform(post("/api/auth/login").contentType(MediaType.APPLICATION_JSON)
+        return (MockHttpSession) http.perform(post("/api/auth/login").with(csrf()).contentType(MediaType.APPLICATION_JSON)
                         .content("{\"email\":\"" + u.getEmail() + "\",\"password\":\"secret-1\"}"))
                 .andExpect(status().isOk()).andReturn().getRequest().getSession(false);
     }

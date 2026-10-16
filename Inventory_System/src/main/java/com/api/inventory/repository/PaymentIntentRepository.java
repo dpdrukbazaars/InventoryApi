@@ -24,8 +24,10 @@ public interface PaymentIntentRepository extends JpaRepository<PaymentIntent, Lo
     List<PaymentIntent> findByOrderIdOrderByIdDesc(Long orderId);
 
     @Modifying
-    // a bank payment waiting for staff to check with the bank (CHECK_BANK) keeps its attempt open until it is settled
+    // Never expire an attempt whose bank debit may have happened, or whose bank confirmed PAID
+    // but whose order/payment intent has not yet been finalized after a crash.
     @Query("update PaymentIntent p set p.status = 'EXPIRED', p.completedAt = :now where p.status = 'CREATED' and p.createdAt < :before"
-            + " and p.reference not in (select b.intentReference from BankPayment b where b.status = 'CHECK_BANK')")
+            + " and p.reference not in (select b.intentReference from BankPayment b"
+            + " where b.status in ('DEBIT_PENDING', 'CHECK_BANK', 'PAID'))")
     int expireOlderThan(@Param("before") Instant before, @Param("now") Instant now);
 }
