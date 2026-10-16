@@ -223,7 +223,50 @@ public class OnlinePaymentService {
             PaymentIntent intent = intents.findByReferenceForUpdate(result.reference())
                     .orElseThrow(() -> new IllegalStateException("Payment not found."));
             if (intent.isFinal()) {
-                return null; // already handled
+                // A duplicate successful callback must not create another payment.
+                if (PaymentIntent.PAID.equals(intent.getStatus())) {
+                    return null;
+                }
+
+                // A verified success arrived after cancellation, expiration or failure.
+                // Record it for staff, but do not automatically confirm the order.
+                if (result.paid()) {
+                    String previousStatus = intent.getStatus();
+                    intent.setStatus(PaymentIntent.PAID);
+                    intent.setProviderReference(cut(result.providerReference(), 80));
+                    intent.setCompletedAt(Instant.now());
+                    intent.setMessage(cut(
+                            "Late successful payment after " + previousStatus
+                                    + ". STAFF RECONCILIATION REQUIRED.", 300));
+                    intents.save(intent);
+
+                    Payment existing = payments.findByOrderId(intent.getOrderId()).orElse(null);
+                    if (existing == null && result.amount() != null && result.amount().signum() > 0) {
+                        Payment receipt = new Payment();
+                        receipt.setOrderId(intent.getOrderId());
+                        receipt.setPaymentMethod("online");
+                        receipt.setAmount(result.amount());
+                        receipt.setStatus("pending");
+                        receipt.setPaymentDate(LocalDateTime.now());
+                        receipt.setJournalNumber(cut(
+                                "ONLINE " + intent.getProvider() + " "
+                                        + (result.providerReference() == null
+                                        ? intent.getReference() : result.providerReference()), 250));
+                        payments.save(receipt);
+                    }
+
+                    audit.record("ONLINE_PAYMENT_LATE_SUCCESS", "order #" + intent.getOrderId(),
+                            "Previous status: " + previousStatus
+                                    + ", payment reference: " + intent.getReference()
+                                    + ", bank reference: " + result.providerReference()
+                                    + ", reported amount: " + result.amount());
+                    staffMustCheck(intent,
+                            "A verified successful payment arrived after " + previousStatus
+                                    + ". Reported amount: Nu. " + result.amount()
+                                    + ". Check the bank receipt, existing payments, and order status "
+                                    + "before settlement or refund.");
+                }
+                return null;
             }
             Instant now = Instant.now();
             intent.setCompletedAt(now);
