@@ -2,16 +2,16 @@
 # Build:  docker build -t drukbazaars-api .   Run:  docker run -p 8080:8080 --env-file drukbazaars.env drukbazaars-api
 # Settings come from environment variables (see DEPLOY-RENDER.md at the top of the repository).
 
-# ---- 1. Build the jar with Maven and Java 26 ----
-FROM maven:3.9-eclipse-temurin-26 AS build
+# ---- 1. Build the jar with Maven and Java 25 ----
+FROM maven:3.9-eclipse-temurin-25 AS build
 WORKDIR /build
 COPY pom.xml .
 RUN mvn -q -B dependency:go-offline
 COPY src ./src
 RUN mvn -q -B -DskipTests package && cp target/Rest-api-*.jar /build/app.jar
 
-# ---- 2. Run it on the Java 26 runtime only ----
-FROM eclipse-temurin:26-jre
+# ---- 2. Run it on the Java 25 runtime only ----
+FROM eclipse-temurin:25-jre
 WORKDIR /app
 RUN useradd --system --uid 10001 --home /app drukbazaars && chown drukbazaars /app
 COPY --from=build /build/app.jar /app/app.jar
