@@ -1,15 +1,19 @@
 package com.api.inventory;
 
 import com.api.inventory.entity.Payment;
+import com.api.inventory.entity.PaymentEvent;
+import com.api.inventory.entity.Order;
 import com.api.inventory.entity.PaymentIntent;
 import com.api.inventory.repository.BankPaymentRepository;
 import com.api.inventory.repository.OrderRepository;
 import com.api.inventory.repository.PaymentIntentRepository;
+import com.api.inventory.repository.PaymentEventRepository;
 import com.api.inventory.repository.PaymentRepository;
 import com.api.inventory.service.AuditService;
 import com.api.inventory.service.NotificationService;
 import com.api.inventory.service.OnlinePaymentService;
 import com.api.inventory.service.OrderService;
+import com.api.inventory.service.PaymentReferenceClaimService;
 import com.api.inventory.service.payments.PaymentGateway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -29,6 +33,8 @@ import static org.mockito.Mockito.*;
 
 class OnlinePaymentLateCallbackTest {
     private final PaymentIntentRepository intents = mock(PaymentIntentRepository.class);
+    private final PaymentEventRepository events = mock(PaymentEventRepository.class);
+    private final PaymentReferenceClaimService referenceClaims = mock(PaymentReferenceClaimService.class);
     private final OrderRepository orders = mock(OrderRepository.class);
     private final PaymentRepository payments = mock(PaymentRepository.class);
     private final BankPaymentRepository bankPayments = mock(BankPaymentRepository.class);
@@ -41,8 +47,10 @@ class OnlinePaymentLateCallbackTest {
     @BeforeEach
     void setup() {
         when(transactionManager.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
-        service = new OnlinePaymentService(intents, orders, payments, bankPayments,
-                orderService, List.<PaymentGateway>of(), notify, audit, transactionManager);
+        when(referenceClaims.claimOrOwn(any(String.class), any(String.class), any(String.class)))
+                .thenReturn(true);
+        service = new OnlinePaymentService(intents, orders, payments, bankPayments, events,
+                referenceClaims, orderService, List.<PaymentGateway>of(), notify, audit, transactionManager);
     }
 
     private PaymentIntent intent(String status) {
@@ -87,6 +95,12 @@ class OnlinePaymentLateCallbackTest {
 
         verify(notify).withPermission(eq("payments.verify"), any(NotificationService.Note.class), eq(true));
         verify(audit).record(eq("ONLINE_PAYMENT_LATE_SUCCESS"), any(), any());
+        var evidence = org.mockito.ArgumentCaptor.forClass(PaymentEvent.class);
+        verify(events).save(evidence.capture());
+        assertEquals("SUCCESS_RECEIPT", evidence.getValue().getStep());
+        assertEquals("PI-LATE123", evidence.getValue().getIntentReference());
+        assertEquals("BANK-JOURNAL-123", evidence.getValue().getProviderReference());
+        assertEquals(new BigDecimal("100.00"), evidence.getValue().getReportedAmount());
         verifyNoInteractions(orderService);
     }
 
@@ -110,10 +124,162 @@ class OnlinePaymentLateCallbackTest {
     @Test
     void duplicateSuccessForPaidAttemptDoesNotCreateAnotherReceipt() {
         PaymentIntent intent = intent(PaymentIntent.PAID);
+        intent.setProviderReference("BANK-JOURNAL-123");
+        when(events.findByIntentReferenceOrderByAtAsc(intent.getReference())).thenReturn(
+                List.of(savedSuccessReceipt("BANK-JOURNAL-123", intent.getReference())));
 
         service.complete(verifiedSuccess());
 
         assertEquals(PaymentIntent.PAID, intent.getStatus());
+        verify(events, never()).save(any(PaymentEvent.class));
         verifyNoInteractions(payments, notify, audit, orderService);
     }
+
+    private PaymentEvent savedSuccessReceipt(String ref, String intentRef) {
+        PaymentEvent e = new PaymentEvent();
+        e.setIntentReference(intentRef);
+        e.setStep("SUCCESS_RECEIPT");
+        e.setResult("OK");
+        e.setProviderReference(ref);
+        e.setReportedAmount(new BigDecimal("100.00"));
+        e.setAt(Instant.now());
+        return e;
+    }
+
+    @Test
+    void differentBankReferenceAfterPaidIsSavedForStaffWithoutReplacingPayment() {
+        PaymentIntent intent = intent(PaymentIntent.PAID);
+        intent.setProviderReference("FIRST-BANK-REFERENCE");
+        when(events.findByIntentReferenceOrderByAtAsc(intent.getReference())).thenReturn(
+                List.of(savedSuccessReceipt("FIRST-BANK-REFERENCE", intent.getReference())));
+
+        service.complete(verifiedSuccess());
+
+        var evidence = org.mockito.ArgumentCaptor.forClass(PaymentEvent.class);
+        verify(events).save(evidence.capture());
+        assertEquals("BANK-JOURNAL-123", evidence.getValue().getProviderReference());
+        assertEquals("SUCCESS_RECEIPT", evidence.getValue().getStep());
+        assertEquals("FIRST-BANK-REFERENCE", intent.getProviderReference());
+        verify(notify).withPermission(eq("payments.verify"), any(NotificationService.Note.class), eq(true));
+        verify(audit).record(eq("ONLINE_PAYMENT_ADDITIONAL_SUCCESS"), any(), any());
+        verifyNoInteractions(payments, orderService);
+    }
+
+    @Test
+    void duplicateBankReferenceIsNotSavedOrNotifiedAgain() {
+        PaymentIntent intent = intent(PaymentIntent.PAID);
+        intent.setProviderReference("BANK-JOURNAL-123");
+        when(events.findByIntentReferenceOrderByAtAsc(intent.getReference())).thenReturn(
+                List.of(savedSuccessReceipt("BANK-JOURNAL-123", intent.getReference())));
+
+        service.complete(verifiedSuccess());
+
+        verify(events, never()).save(any(PaymentEvent.class));
+        verifyNoInteractions(payments, audit, notify, orderService);
+    }
+
+    @Test
+    void alreadyRecordedAdditionalReferenceIsNotSavedOrNotifiedAgain() {
+        PaymentIntent intent = intent(PaymentIntent.PAID);
+        intent.setProviderReference("FIRST-BANK-REFERENCE");
+        when(events.findByIntentReferenceOrderByAtAsc(intent.getReference())).thenReturn(List.of(
+                savedSuccessReceipt("FIRST-BANK-REFERENCE", intent.getReference()),
+                savedSuccessReceipt("BANK-JOURNAL-123", intent.getReference())));
+
+        service.complete(verifiedSuccess());
+
+        verify(events, never()).save(any(PaymentEvent.class));
+        verifyNoInteractions(payments, audit, notify, orderService);
+    }
+
+    @Test
+    void existingPaymentIsNotOverwrittenOnNewSuccessfulAttempt() {
+        intent(PaymentIntent.CREATED);
+        Payment existing = new Payment();
+        existing.setOrderId(42L);
+        existing.setStatus("confirmed");
+        existing.setJournalNumber("FIRST-JOURNAL");
+        when(payments.findByOrderId(42L)).thenReturn(Optional.of(existing));
+        Order order = new Order();
+        order.setOrderId(42L);
+        order.setPaymentStatus("PENDING");
+        when(orders.findById(42L)).thenReturn(Optional.of(order));
+
+        service.complete(verifiedSuccess());
+
+        verify(payments, never()).save(any(Payment.class));
+        assertEquals("FIRST-JOURNAL", existing.getJournalNumber());
+        verify(events).save(any(PaymentEvent.class));
+        verify(notify).withPermission(eq("payments.verify"), any(NotificationService.Note.class), eq(true));
+        verifyNoInteractions(orderService);
+    }
+
+    @Test
+    void referencePreviouslyClaimedByAnotherIntentRequiresStaffReview() {
+        intent(PaymentIntent.CREATED);
+        when(referenceClaims.claimOrOwn("SANDBOX", "BANK-JOURNAL-123", "PI-LATE123"))
+                .thenReturn(false);
+        Order order = new Order();
+        order.setOrderId(42L);
+        order.setPaymentStatus("PENDING");
+        when(orders.findById(42L)).thenReturn(Optional.of(order));
+
+        service.complete(verifiedSuccess());
+
+        verify(events).save(any(PaymentEvent.class));
+        verify(notify).withPermission(eq("payments.verify"), any(NotificationService.Note.class), eq(true));
+        verifyNoInteractions(orderService);
+    }
+
+    @Test
+    void normalSuccessStoresEvidenceAndConfirmsOrder() {
+        intent(PaymentIntent.CREATED);
+        Order order = new Order();
+        order.setOrderId(42L);
+        order.setPaymentStatus("PENDING");
+        order.setOrderStatus("PLACED");
+        when(orders.findById(42L)).thenReturn(Optional.of(order));
+
+        service.complete(verifiedSuccess());
+
+        verify(events).save(any(PaymentEvent.class));
+        verify(payments).save(any(Payment.class));
+        verify(orders).save(order);
+        verify(orderService).confirmPayment(42L);
+    }
+
+    @Test
+    void missingJournalDoesNotAutomaticallyConfirmOrder() {
+        intent(PaymentIntent.CREATED);
+        Order order = new Order();
+        order.setOrderId(42L);
+        order.setPaymentStatus("PENDING");
+        when(orders.findById(42L)).thenReturn(Optional.of(order));
+
+        service.complete(new PaymentGateway.Result("PI-LATE123", true, null,
+                new BigDecimal("100.00"), "Bank says paid, journal missing"));
+
+        verifyNoInteractions(referenceClaims);
+        verify(events).save(any(PaymentEvent.class));
+        verify(notify).withPermission(eq("payments.verify"), any(NotificationService.Note.class), eq(true));
+        verifyNoInteractions(orderService);
+        assertEquals("PENDING", order.getPaymentStatus());
+    }
+
+    @Test
+    void oversizedReferenceIsNeverTruncatedIntoAClaim() {
+        intent(PaymentIntent.CREATED);
+        Order order = new Order();
+        order.setOrderId(42L);
+        order.setPaymentStatus("PENDING");
+        when(orders.findById(42L)).thenReturn(Optional.of(order));
+
+        service.complete(new PaymentGateway.Result("PI-LATE123", true, "X".repeat(81),
+                new BigDecimal("100.00"), "Bank reported success"));
+
+        verifyNoInteractions(referenceClaims);
+        verify(notify).withPermission(eq("payments.verify"), any(NotificationService.Note.class), eq(true));
+        verifyNoInteractions(orderService);
+    }
+
 }

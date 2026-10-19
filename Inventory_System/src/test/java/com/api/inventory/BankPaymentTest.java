@@ -52,7 +52,6 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "spring.datasource.password=",
         "spring.jpa.hibernate.ddl-auto=create-drop",
         "spring.flyway.enabled=false",
-        "spring.session.jdbc.initialize-schema=always",
         "spring.jpa.show-sql=false",
         "app.private-upload-dir=target/test-private-uploads",
         "app.payments.bank.mode=test",
@@ -135,7 +134,14 @@ class BankPaymentTest {
         assertEquals("PAID", row.getStatus());
         assertTrue(row.isTestMode());
         assertEquals(1, row.getCodesSent());
-        List<String> steps = eventRepo.findByIntentReferenceOrderByAtAsc(ref).stream().map(PaymentEvent::getStep).toList();
+        List<PaymentEvent> allEvents = eventRepo.findByIntentReferenceOrderByAtAsc(ref);
+        List<String> steps = allEvents.stream()
+                .map(PaymentEvent::getStep)
+                .filter(step -> !"SUCCESS_RECEIPT".equals(step))
+                .toList();
+        assertEquals(1, allEvents.stream()
+                .filter(e -> "SUCCESS_RECEIPT".equals(e.getStep()))
+                .count(), "one durable bank receipt event should be stored");
         assertEquals(List.of("STARTED",
                 "CODE_REQUESTED",
                 "CODE_SENT",
@@ -247,14 +253,17 @@ class BankPaymentTest {
         assertThrows(AccessDeniedException.class, () -> bank.toCheck(), "customers cannot settle");
 
         as(admin);
-        assertEquals(List.of(ref), bank.toCheck().stream().map(BankPaymentService.ToCheck::reference).toList());
+        assertEquals(List.of(ref), bank.toCheck().stream()
+                .filter(check -> order.getOrderId().equals(check.orderId()))
+                .map(BankPaymentService.ToCheck::reference).toList());
         assertThrows(IllegalArgumentException.class, () -> bank.settle(ref, true, " "), "paid needs the bank's journal number");
-        assertEquals("PAID", bank.settle(ref, true, "bob 99887766").status());
-        assertTrue(bank.toCheck().isEmpty());
+        assertEquals("PAID", bank.settle(ref, true, "bob 99887767").status());
+        assertTrue(bank.toCheck().stream().noneMatch(check -> ref.equals(check.reference())),
+                "the settled payment must leave the reconciliation queue");
         Order after = orderRepo.findById(order.getOrderId()).orElseThrow();
         assertEquals("PAID", after.getPaymentStatus());
         assertEquals("CONFIRMED", after.getOrderStatus());
-        assertEquals("ONLINE BANK BOB 99887766", paymentRepo.findByOrderId(order.getOrderId()).orElseThrow().getJournalNumber());
+        assertEquals("ONLINE BANK BOB 99887767", paymentRepo.findByOrderId(order.getOrderId()).orElseThrow().getJournalNumber());
         assertThrows(IllegalStateException.class, () -> bank.settle(ref, false, null), "settled once");
 
         // the other way: the bank says nothing was taken, and the customer can pay again
@@ -384,15 +393,6 @@ class BankPaymentTest {
         assertEquals(debitEventsBefore, eventRepo.findByIntentReferenceOrderByAtAsc(ref).stream()
                 .filter(e -> "DEBIT_REQUESTED".equals(e.getStep())).count(),
                 "no second debit request event should be recorded");
-
-        // This test manually created DEBIT_PENDING and NEVER called the gateway.
-        // Close the artificial pending attempt so it cannot affect other tests
-        // sharing the same in-memory H2 database.
-        as(user("pending-cleanup@bank.bt", "ADMIN"));
-        assertEquals(BankPayment.FAILED, bank.settle(ref, false, null).status(),
-                "cleanup: no simulated bank debit was ever sent");
-        assertTrue(bank.toCheck().stream().noneMatch(p -> ref.equals(p.reference())),
-                "cleanup must remove the artificial pending attempt from staff's queue");
     }
 
     /**

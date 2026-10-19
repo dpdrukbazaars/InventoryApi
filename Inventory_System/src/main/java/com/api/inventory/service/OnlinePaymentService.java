@@ -3,10 +3,12 @@ package com.api.inventory.service;
 import com.api.inventory.entity.Order;
 import com.api.inventory.entity.Payment;
 import com.api.inventory.entity.PaymentIntent;
+import com.api.inventory.entity.PaymentEvent;
 import com.api.inventory.entity.BankPayment;
 import com.api.inventory.repository.BankPaymentRepository;
 import com.api.inventory.repository.OrderRepository;
 import com.api.inventory.repository.PaymentIntentRepository;
+import com.api.inventory.repository.PaymentEventRepository;
 import com.api.inventory.repository.PaymentRepository;
 import com.api.inventory.security.CurrentUser;
 import com.api.inventory.service.payments.PaymentGateway;
@@ -31,6 +33,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Objects;
 
 /**
  * Paying an order online.
@@ -64,6 +67,8 @@ public class OnlinePaymentService {
     }
 
     private final PaymentIntentRepository intents;
+    private final PaymentEventRepository events;
+    private final PaymentReferenceClaimService referenceClaims;
     private final OrderRepository orders;
     private final PaymentRepository payments;
     private final BankPaymentRepository bankPayments;
@@ -75,10 +80,12 @@ public class OnlinePaymentService {
     private final TransactionTemplate newTx;
 
     public OnlinePaymentService(PaymentIntentRepository intents, OrderRepository orders, PaymentRepository payments,
-                                BankPaymentRepository bankPayments,
-                                OrderService orderService, List<PaymentGateway> gateways, NotificationService notify,
+                                BankPaymentRepository bankPayments, PaymentEventRepository events,
+                                PaymentReferenceClaimService referenceClaims, OrderService orderService, List<PaymentGateway> gateways, NotificationService notify,
                                 AuditService audit, PlatformTransactionManager transactions) {
         this.intents = intents;
+        this.events = events;
+        this.referenceClaims = referenceClaims;
         this.orders = orders;
         this.payments = payments;
         this.bankPayments = bankPayments;
@@ -215,29 +222,55 @@ public class OnlinePaymentService {
     }
 
     /**
-     * The gateway's result. Safe to call twice for the same payment: the second call changes nothing.
-     * Step 1 records the money (its own transaction, so it is never lost); step 2 confirms the order.
+     * A verified gateway result. Each new bank receipt is preserved as a PaymentEvent.
+     * The intent lock serializes callbacks for the same attempt. Different successful
+     * bank references never overwrite the first payment or confirm the order again.
      */
     public void complete(PaymentGateway.Result result) {
         Long orderToConfirm = tx.execute(status -> {
             PaymentIntent intent = intents.findByReferenceForUpdate(result.reference())
                     .orElseThrow(() -> new IllegalStateException("Payment not found."));
+
+            // Only verified success results get recorded as bank-receipt evidence.
+            // A callback is verified by callback(), or supplied by the trusted bank service.
+            String providerReference = normalizeReference(result.providerReference());
+            // Claim atomically before recording evidence. A conflicting bank report is
+            // retained in payment_events but must never confirm a different order.
+            boolean differentAttemptSameBankReference = result.paid() && providerReference != null
+                    && !referenceClaims.claimOrOwn(intent.getProvider(), providerReference, intent.getReference());
+            boolean newReceipt = result.paid() && recordSuccessReceiptIfNew(intent, result);
+
             if (intent.isFinal()) {
-                // A duplicate successful callback must not create another payment.
                 if (PaymentIntent.PAID.equals(intent.getStatus())) {
+                    // A second *distinct* success can represent a second debit. Never
+                    // overwrite the first receipt or confirm the order a second time.
+                    String incomingReference = normalizeReference(result.providerReference());
+                    String originalReference = normalizeReference(intent.getProviderReference());
+                    boolean differentBankReference = !Objects.equals(incomingReference, originalReference);
+                    boolean amountChanged = result.amount() != null
+                            && result.amount().compareTo(intent.getAmount()) != 0;
+                    if ((newReceipt && (differentBankReference || differentAttemptSameBankReference
+                            || incomingReference == null)) || amountChanged) {
+                        audit.record("ONLINE_PAYMENT_ADDITIONAL_SUCCESS", "order #" + intent.getOrderId(),
+                                "Intent " + intent.getReference() + ", new bank reference: " + incomingReference
+                                        + ", amount: " + result.amount());
+                        staffMustCheck(intent,
+                                "An additional successful bank result was reported. Bank reference: "
+                                        + incomingReference + ", reported amount: " + result.amount()
+                                        + ". Verify whether this is another debit and whether a refund is needed.");
+                    }
                     return null;
                 }
 
-                // A verified success arrived after cancellation, expiration or failure.
-                // Record it for staff, but do not automatically confirm the order.
+                // Successful debit after cancellation/expiry/failure: retain the receipt,
+                // but leave the order for staff verification instead of confirming it.
                 if (result.paid()) {
                     String previousStatus = intent.getStatus();
                     intent.setStatus(PaymentIntent.PAID);
                     intent.setProviderReference(cut(result.providerReference(), 80));
                     intent.setCompletedAt(Instant.now());
-                    intent.setMessage(cut(
-                            "Late successful payment after " + previousStatus
-                                    + ". STAFF RECONCILIATION REQUIRED.", 300));
+                    intent.setMessage(cut("Late successful payment after " + previousStatus
+                            + ". STAFF RECONCILIATION REQUIRED.", 300));
                     intents.save(intent);
 
                     Payment existing = payments.findByOrderId(intent.getOrderId()).orElse(null);
@@ -248,70 +281,85 @@ public class OnlinePaymentService {
                         receipt.setAmount(result.amount());
                         receipt.setStatus("pending");
                         receipt.setPaymentDate(LocalDateTime.now());
-                        receipt.setJournalNumber(cut(
-                                "ONLINE " + intent.getProvider() + " "
-                                        + (result.providerReference() == null
-                                        ? intent.getReference() : result.providerReference()), 250));
+                        receipt.setJournalNumber(cut("ONLINE " + intent.getProvider() + " "
+                                + (result.providerReference() == null
+                                ? intent.getReference() : result.providerReference()), 250));
                         payments.save(receipt);
                     }
 
                     audit.record("ONLINE_PAYMENT_LATE_SUCCESS", "order #" + intent.getOrderId(),
-                            "Previous status: " + previousStatus
-                                    + ", payment reference: " + intent.getReference()
-                                    + ", bank reference: " + result.providerReference()
-                                    + ", reported amount: " + result.amount());
+                            "Previous status: " + previousStatus + ", payment reference: "
+                                    + intent.getReference() + ", bank reference: "
+                                    + result.providerReference() + ", reported amount: " + result.amount());
                     staffMustCheck(intent,
-                            "A verified successful payment arrived after " + previousStatus
-                                    + ". Reported amount: Nu. " + result.amount()
-                                    + ". Check the bank receipt, existing payments, and order status "
-                                    + "before settlement or refund.");
+                            "A successful payment arrived after " + previousStatus
+                                    + ". Bank reference: " + result.providerReference()
+                                    + ", amount: Nu. " + result.amount()
+                                    + ". Check the bank, existing payments, order status and refund requirements.");
                 }
                 return null;
             }
+
             Instant now = Instant.now();
             intent.setCompletedAt(now);
             intent.setProviderReference(cut(result.providerReference(), 80));
             if (!result.paid()) {
                 intent.setStatus(PaymentIntent.FAILED);
-                intent.setMessage(cut(result.message() == null ? "The payment did not go through." : result.message(), 300));
+                intent.setMessage(cut(result.message() == null
+                        ? "The payment did not go through." : result.message(), 300));
                 intents.save(intent);
                 return null;
             }
 
             intent.setStatus(PaymentIntent.PAID);
-            intent.setMessage("Paid");
+            intent.setMessage(differentAttemptSameBankReference
+                    ? "Bank reference conflict. STAFF RECONCILIATION REQUIRED."
+                    : "Paid");
             intents.save(intent);
             audit.record("ONLINE_PAYMENT", "order #" + intent.getOrderId(),
-                    intent.getProvider() + " Nu. " + result.amount() + ", ref " + intent.getReference() + " / " + result.providerReference());
+                    intent.getProvider() + " Nu. " + result.amount() + ", ref "
+                            + intent.getReference() + " / " + result.providerReference());
 
             Order order = orders.findById(intent.getOrderId()).orElse(null);
-            boolean amountRight = result.amount() != null && result.amount().compareTo(intent.getAmount()) == 0;
-            // the money is recorded like a transfer waiting to be checked; confirming the order marks it confirmed
-            Payment payment = payments.findByOrderId(intent.getOrderId()).orElseGet(Payment::new);
-            payment.setOrderId(intent.getOrderId());
-            payment.setPaymentMethod("online");
-            payment.setAmount(result.amount() == null ? intent.getAmount() : result.amount());
-            payment.setStatus("pending");
-            payment.setPaymentDate(LocalDateTime.now());
-            payment.setJournalNumber(cut("ONLINE " + intent.getProvider() + " " + (result.providerReference() == null ? intent.getReference()
-                    : result.providerReference()), 250));
-            payments.save(payment);
+            boolean amountRight = result.amount() != null
+                    && result.amount().compareTo(intent.getAmount()) == 0;
+            Payment existing = payments.findByOrderId(intent.getOrderId()).orElse(null);
+            // Never rewrite an earlier payment record, even if it was not confirmed.
+            if (existing == null) {
+                Payment payment = new Payment();
+                payment.setOrderId(intent.getOrderId());
+                payment.setPaymentMethod("online");
+                payment.setAmount(result.amount() == null ? intent.getAmount() : result.amount());
+                payment.setStatus("pending");
+                payment.setPaymentDate(LocalDateTime.now());
+                payment.setJournalNumber(cut("ONLINE " + intent.getProvider() + " "
+                        + (result.providerReference() == null
+                        ? intent.getReference() : result.providerReference()), 250));
+                payments.save(payment);
+            }
 
             String problem = null;
             if (order == null) {
                 problem = "the order no longer exists";
+            } else if (differentAttemptSameBankReference) {
+                problem = "the bank reference is also recorded for another payment attempt";
+            } else if (existing != null) {
+                problem = "a payment record already exists for this order: do not overwrite it";
+            } else if (normalizeReference(result.providerReference()) == null) {
+                problem = "the gateway did not supply a usable bank reference: staff must check the bank";
             } else if (!amountRight) {
-                problem = "the gateway charged Nu. " + result.amount() + " but the order needed Nu. " + intent.getAmount();
+                problem = "the gateway reported Nu. " + result.amount()
+                        + " but this attempt expected Nu. " + intent.getAmount();
             } else if ("CANCELLED".equals(order.getOrderStatus())) {
-                problem = "the order was cancelled before the payment arrived: refund it";
+                problem = "the order was cancelled before the payment arrived: check for a refund";
             } else if (!"PENDING".equals(order.getPaymentStatus())) {
-                problem = "the order was already paid: refund the second payment";
+                problem = "the order was already paid: check whether a refund is needed";
             }
             if (problem != null) {
                 staffMustCheck(intent, problem);
                 return null;
             }
-            order.setPaymentVerifiedBy("online:" + intent.getProvider()); // confirmed by the bank, not by a person
+            order.setPaymentVerifiedBy("online:" + intent.getProvider());
             orders.save(order);
             return order.getOrderId();
         });
@@ -320,13 +368,53 @@ public class OnlinePaymentService {
             try {
                 newTx.executeWithoutResult(s -> orderService.confirmPayment(orderToConfirm));
             } catch (RuntimeException e) {
-                // for example the last item sold out at the counter meanwhile: staff call the customer
                 PaymentIntent intent = intents.findByReference(result.reference()).orElse(null);
                 if (intent != null) {
-                    tx.executeWithoutResult(s -> staffMustCheck(intent, "it was paid but could not be confirmed: " + e.getMessage()));
+                    tx.executeWithoutResult(s -> staffMustCheck(intent,
+                            "it was paid but could not be confirmed: " + e.getMessage()));
                 }
             }
         }
+    }
+
+    /**
+     * Append each distinct successful bank result in the same transaction as the
+     * PaymentIntent update. The intent row is already locked by complete().
+     * For missing bank references we can preserve one receipt per attempt only;
+     * staff must confirm the actual number of bank debits independently.
+     */
+    private boolean recordSuccessReceiptIfNew(PaymentIntent intent, PaymentGateway.Result result) {
+        String incomingRef = normalizeReference(result.providerReference());
+        boolean alreadyRecorded = events.findByIntentReferenceOrderByAtAsc(intent.getReference())
+                .stream().anyMatch(e -> "SUCCESS_RECEIPT".equals(e.getStep())
+                        && Objects.equals(normalizeReference(e.getProviderReference()), incomingRef));
+        if (alreadyRecorded) {
+            return false;
+        }
+
+        PaymentEvent event = new PaymentEvent();
+        event.setIntentReference(intent.getReference());
+        event.setStep("SUCCESS_RECEIPT");
+        event.setResult("OK");
+        event.setActor(cut("gateway:" + intent.getProvider(), 120));
+        event.setProviderReference(cut(incomingRef, 80));
+        event.setReportedAmount(result.amount());
+        event.setAt(Instant.now());
+        event.setMessage(incomingRef == null
+                ? "Gateway reported successful payment without a bank reference; staff verification needed."
+                : "Gateway reported successful payment; retain for bank reconciliation.");
+        events.save(event);
+        return true;
+    }
+
+    private static String normalizeReference(String ref) {
+        if (ref == null || ref.isBlank()) {
+            return null;
+        }
+        String trimmed = ref.trim();
+        // Never claim a truncated identifier: different original references
+        // could otherwise collide at character 80.
+        return trimmed.length() > 80 ? null : trimmed;
     }
 
     /** Every 10 minutes: attempts nobody finished within an hour are closed. */

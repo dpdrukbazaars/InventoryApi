@@ -3,6 +3,7 @@ package com.api.inventory.entity;
 import jakarta.persistence.*;
 import lombok.Getter;
 import lombok.Setter;
+import java.math.BigDecimal;
 
 import java.time.Instant;
 
@@ -37,6 +38,12 @@ public class PaymentEvent {
 
     @Column(length = 120)
     private String actor;
+
+    @Column(name = "provider_reference", length = 80)
+    private String providerReference;
+
+    @Column(name = "reported_amount", precision = 12, scale = 2)
+    private BigDecimal reportedAmount;
 
     @Column(nullable = false)
     private Instant at;

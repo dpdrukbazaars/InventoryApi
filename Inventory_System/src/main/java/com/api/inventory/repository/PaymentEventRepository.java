@@ -9,7 +9,7 @@ import java.util.List;
 public interface PaymentEventRepository extends JpaRepository<PaymentEvent, Long> {
 
     List<PaymentEvent> findByIntentReferenceOrderByAtAsc(String intentReference);
-
+    List<PaymentEvent> findByProviderReference(String providerReference);
     /** For example: how many codes this customer had sent in the last hour. */
     long countByActorAndStepAndAtAfter(String actor, String step, Instant after);
 }

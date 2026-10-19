@@ -348,10 +348,10 @@ public class BankPaymentService {
         return outcome.view() != null ? outcome.view() : view(reference);
     }
 
-    /** The bank's journal number is what the payment is recorded and receipted under (the gateway's number otherwise). */
+    /** Only a bank journal is sufficient to auto-confirm a debit. If absent,
+     * the gateway transaction ID remains available in BankPayment for staff. */
     private static PaymentGateway.Result paidResult(PaymentIntent intent, BankPayment bp) {
-        String journal = bp.getBankReference() != null ? bp.getBankReference() : bp.getGatewayTransactionId();
-        return new PaymentGateway.Result(intent.getReference(), true, journal, bp.getAmount(),
+        return new PaymentGateway.Result(intent.getReference(), true, bp.getBankReference(), bp.getAmount(),
                 "Bank account ending " + bp.getAccountLast4());
     }
 
